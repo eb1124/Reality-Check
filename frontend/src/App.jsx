@@ -7,11 +7,13 @@ import SessionControls from './components/session/SessionControls';
 import { ChallengeSlot, AnalysisSlot } from './components/session/ModularPanelSlots';
 import LightChallengePanel from './components/session/LightChallengePanel';
 import LightFlashOverlay from './components/session/LightFlashOverlay';
+import VerificationResultSummary from './components/session/VerificationResultSummary';
 import { useCamera } from './hooks/useCamera';
 import { useSession } from './hooks/useSession';
 import { useFaceLandmarker } from './hooks/useFaceLandmarker';
 import { useChallengeEngine } from './hooks/useChallengeEngine';
 import { useLightChallengeEngine } from './hooks/useLightChallengeEngine';
+import { useVerificationOrchestrator } from './hooks/useVerificationOrchestrator';
 import './styles/App.css';
 
 export default function App() {
@@ -45,6 +47,18 @@ export default function App() {
     isSessionActive,
     isCameraActive,
     videoRef
+  });
+
+  // Verification Orchestrator — sequences the two engines above (Head Turn
+  // primary, Light Challenge secondary/supplementary) into one coherent
+  // verification flow with a single combined verdict. Coordinates only;
+  // neither engine's internal detection logic is modified.
+  const orchestrator = useVerificationOrchestrator({
+    isCameraActive,
+    isSessionActive,
+    startSession: startVerification,
+    challengeEngine,
+    lightChallengeEngine
   });
 
   // Fan each MediaPipe frame out to both challenge engines.
@@ -115,10 +129,15 @@ export default function App() {
             />
           )}
 
-          {/* Light Challenge Panel (Reality Check MVP: skin reflectance / colour-match response) — kept directly below the camera feed so telemetry never scrolls out of sync with the video during testing. */}
+          {/* Light Challenge Panel (Reality Check MVP: skin reflectance / colour-match response) — kept directly below the camera feed so telemetry never scrolls out of sync with the video during testing. Orchestrated: only offers its consent/start controls once the primary Head-Turn challenge has succeeded. */}
           <LightChallengePanel
             isSessionActive={isSessionActive}
             lightChallengeEngine={lightChallengeEngine}
+            orchestrated
+            awaitingConsent={orchestrator.awaitingLightConsent}
+            onConsentAccept={orchestrator.acceptLightConsent}
+            onConsentDecline={orchestrator.declineLightConsent}
+            onOrchestratedRetry={orchestrator.retry}
           />
         </section>
 
@@ -127,20 +146,29 @@ export default function App() {
           {/* Briefing Card: Explains Active Challenge Verification */}
           <SessionIntro />
 
-          {/* Action Controls: Enable Camera / Start Verification */}
+          {/* Action Controls: Enable Camera / Start Verification — "Start Verification"
+              now begins the orchestrated Head-Turn -> Light Challenge sequence, not
+              merely a session flag. */}
           <SessionControls
             cameraStatus={cameraStatus}
             isSessionActive={isSessionActive}
             onStartCamera={startCamera}
             onStopCamera={handleStopCamera}
-            onStartVerification={startVerification}
+            onStartVerification={orchestrator.startVerification}
             onStopVerification={stopVerification}
           />
 
-          {/* Active Challenge Engine Slot (Phase 3: Turn Head Left) */}
+          {/* Combined verification verdict — only rendered once the orchestrated
+              sequence reaches a result. */}
+          <VerificationResultSummary verdict={orchestrator.verdict} onRetry={orchestrator.retry} />
+
+          {/* Active Challenge Engine Slot (Phase 3: Turn Head Left) — orchestrated:
+              direction is randomly assigned, manual selection is hidden. */}
           <ChallengeSlot
             isSessionActive={isSessionActive}
             challengeEngine={challengeEngine}
+            orchestrated
+            onOrchestratedRetry={orchestrator.retry}
           />
 
           {/* Real-Time Face Landmark Analysis Telemetry */}

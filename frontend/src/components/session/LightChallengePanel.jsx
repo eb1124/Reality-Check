@@ -32,7 +32,15 @@ function DeltaRow({ label, delta, relativeDelta }) {
  * colour-match response. Independent of the Motion Challenge panel; does
  * not read or affect its engine.
  */
-export default function LightChallengePanel({ isSessionActive, lightChallengeEngine }) {
+export default function LightChallengePanel({
+  isSessionActive,
+  lightChallengeEngine,
+  orchestrated = false,
+  awaitingConsent = false,
+  onConsentAccept,
+  onConsentDecline,
+  onOrchestratedRetry
+}) {
   const [consentGiven, setConsentGiven] = useState(false);
   const [showTelemetry, setShowTelemetry] = useState(true);
 
@@ -47,6 +55,9 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
     startLightChallenge,
     retryLightChallenge
   } = lightChallengeEngine || {};
+
+  const handleStart = () => (orchestrated ? onConsentAccept?.() : startLightChallenge());
+  const handleRetry = () => (orchestrated ? onOrchestratedRetry?.() : retryLightChallenge());
 
   const S = LIGHT_CHALLENGE_STATE;
   const isIdle = !isSessionActive || challengeState === S.IDLE;
@@ -101,7 +112,16 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
           </div>
         </div>
 
-        {isIdle && (
+        {isIdle && orchestrated && !awaitingConsent && (
+          <div className="light-idle-view">
+            <p className="slot-empty-notice">
+              Standby — this supplementary check runs automatically after the primary
+              Head-Turn challenge succeeds.
+            </p>
+          </div>
+        )}
+
+        {isIdle && (!orchestrated || awaitingConsent) && (
           <div className="light-idle-view">
             <label className="light-consent-row">
               <input
@@ -111,15 +131,26 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
               />
               <span>I understand this test will flash a bright colour on screen and want to proceed.</span>
             </label>
-            <button
-              type="button"
-              className="btn btn-primary btn-small"
-              disabled={!isSessionActive || !consentGiven}
-              onClick={() => startLightChallenge()}
-            >
-              <Lightbulb size={13} />
-              <span>Start Light Challenge</span>
-            </button>
+            <div className="result-actions">
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                disabled={!isSessionActive || !consentGiven}
+                onClick={handleStart}
+              >
+                <Lightbulb size={13} />
+                <span>Start Light Challenge</span>
+              </button>
+              {orchestrated && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-small"
+                  onClick={() => onConsentDecline?.()}
+                >
+                  <span>Decline (skip supplementary check)</span>
+                </button>
+              )}
+            </div>
             <p className="slot-empty-notice light-mvp-notice">
               <HelpCircle size={12} /> MVP / calibration build — thresholds are PROVISIONAL and not yet
               validated against real webcam data. This challenge reports a supplementary PASS/INCONCLUSIVE
@@ -189,7 +220,7 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
               </span>
             </div>
             <div className="result-actions">
-              <button type="button" className="btn btn-secondary btn-small" onClick={() => retryLightChallenge()}>
+              <button type="button" className="btn btn-secondary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Test Again</span>
               </button>
@@ -209,7 +240,7 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
               </div>
             </div>
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={() => retryLightChallenge()}>
+              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Retry Challenge</span>
               </button>
@@ -229,7 +260,7 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
               </div>
             </div>
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={() => retryLightChallenge()}>
+              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Retry Challenge</span>
               </button>
@@ -249,7 +280,7 @@ export default function LightChallengePanel({ isSessionActive, lightChallengeEng
               </div>
             </div>
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={() => retryLightChallenge()}>
+              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Retry Challenge</span>
               </button>

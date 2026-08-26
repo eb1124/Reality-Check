@@ -21,7 +21,9 @@ import { CHALLENGE_STATE, CHALLENGE_TYPES } from '../../constants/challengeConst
  */
 export function ChallengeSlot({
   isSessionActive,
-  challengeEngine
+  challengeEngine,
+  orchestrated = false,
+  onOrchestratedRetry
 }) {
   const [showTelemetry, setShowTelemetry] = useState(true);
 
@@ -38,6 +40,8 @@ export function ChallengeSlot({
     selectChallengeType,
     retryChallenge
   } = challengeEngine || {};
+
+  const handleRetry = () => (orchestrated ? onOrchestratedRetry?.() : retryChallenge());
 
   const isIdle = !isSessionActive || challengeState === CHALLENGE_STATE.IDLE;
   const isPreparing = challengeState === CHALLENGE_STATE.PREPARING;
@@ -83,8 +87,10 @@ export function ChallengeSlot({
       </div>
 
       <div className="panel-body">
-        {/* Direction Switcher (When Idle or on Result Screen) */}
-        {(isIdle || isSuccess || isTimeout || isInvalid) && (
+        {/* Direction Switcher (When Idle or on Result Screen) — hidden under
+            orchestration, where the direction is randomly assigned by the
+            verification orchestrator and must not be user-selectable. */}
+        {!orchestrated && (isIdle || isSuccess || isTimeout || isInvalid) && (
           <div className="challenge-selector-bar">
             <span className="selector-label">Motion Challenge:</span>
             <div className="selector-buttons">
@@ -113,7 +119,9 @@ export function ChallengeSlot({
         {isIdle && (
           <div className="challenge-idle-view">
             <p className="slot-empty-notice">
-              Selected challenge: <strong>{currentChallenge?.title}</strong>. Click <strong>"Start Verification"</strong> to begin.
+              {orchestrated
+                ? 'A random direction (Left or Right) will be assigned when you click "Start Verification".'
+                : <>Selected challenge: <strong>{currentChallenge?.title}</strong>. Click <strong>"Start Verification"</strong> to begin.</>}
             </p>
           </div>
         )}
@@ -249,7 +257,7 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-secondary btn-small" onClick={() => retryChallenge()}>
+              <button type="button" className="btn btn-secondary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Test Again</span>
               </button>
@@ -270,7 +278,7 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={() => retryChallenge()}>
+              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Retry Challenge</span>
               </button>
@@ -291,7 +299,7 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={() => retryChallenge()}>
+              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
                 <RefreshCw size={13} />
                 <span>Retry Challenge</span>
               </button>
