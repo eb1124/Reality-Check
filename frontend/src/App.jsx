@@ -1,14 +1,17 @@
-import React, { useRef } from 'react';
+import React, { useRef, useCallback } from 'react';
 import Header from './components/common/Header';
 import CameraFeed from './components/video/CameraFeed';
 import ErrorBanner from './components/ui/ErrorBanner';
 import SessionIntro from './components/session/SessionIntro';
 import SessionControls from './components/session/SessionControls';
 import { ChallengeSlot, AnalysisSlot } from './components/session/ModularPanelSlots';
+import LightChallengePanel from './components/session/LightChallengePanel';
+import LightFlashOverlay from './components/session/LightFlashOverlay';
 import { useCamera } from './hooks/useCamera';
 import { useSession } from './hooks/useSession';
 import { useFaceLandmarker } from './hooks/useFaceLandmarker';
 import { useChallengeEngine } from './hooks/useChallengeEngine';
+import { useLightChallengeEngine } from './hooks/useLightChallengeEngine';
 import './styles/App.css';
 
 export default function App() {
@@ -30,13 +33,30 @@ export default function App() {
     resetSession
   } = useSession(cameraStatus);
 
-  // Active Challenge Engine (Turn Head Left state machine)
+  // Active Challenge Engine (Turn Head Left/Right state machine) — unmodified.
   const challengeEngine = useChallengeEngine({
     isSessionActive,
     isCameraActive
   });
 
-  // Real-time MediaPipe Face Landmark analysis (supplies per-frame landmarks to challenge engine)
+  // Light Challenge Engine (Reality Check, skin reflectance / colour-match response, MVP).
+  // Fully independent of challengeEngine above — never reads or mutates its state.
+  const lightChallengeEngine = useLightChallengeEngine({
+    isSessionActive,
+    isCameraActive,
+    videoRef
+  });
+
+  // Fan each MediaPipe frame out to both challenge engines.
+  const handleFrame = useCallback(
+    (frame) => {
+      challengeEngine.processFrame(frame);
+      lightChallengeEngine.processFrame(frame);
+    },
+    [challengeEngine, lightChallengeEngine]
+  );
+
+  // Real-time MediaPipe Face Landmark analysis (supplies per-frame landmarks to both challenge engines)
   const {
     faceState,
     faceCount,
@@ -46,7 +66,7 @@ export default function App() {
     videoRef,
     canvasRef,
     isCameraActive,
-    onFrame: challengeEngine.processFrame
+    onFrame: handleFrame
   });
 
   const handleStopCamera = () => {
@@ -56,6 +76,9 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* Full-viewport colour flash for the Light Challenge — only ever rendered while the user's consented attempt is actively flashing. */}
+      <LightFlashOverlay isActive={lightChallengeEngine.isFlashActive} colorCss={lightChallengeEngine.flashColorCss} />
+
       {/* Header with Title and Global Status Badge */}
       <Header cameraStatus={cameraStatus} />
 
@@ -91,6 +114,12 @@ export default function App() {
               onRetry={startCamera}
             />
           )}
+
+          {/* Light Challenge Panel (Reality Check MVP: skin reflectance / colour-match response) — kept directly below the camera feed so telemetry never scrolls out of sync with the video during testing. */}
+          <LightChallengePanel
+            isSessionActive={isSessionActive}
+            lightChallengeEngine={lightChallengeEngine}
+          />
         </section>
 
         {/* Right Column: Controls, Active Challenge, & Telemetry */}
