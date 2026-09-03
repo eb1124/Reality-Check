@@ -17,7 +17,7 @@ const LIGHT_LABELS = {
  * Presentational only — reads the verdict object produced by
  * useVerificationOrchestrator; does not touch either underlying engine.
  */
-export default function VerificationResultSummary({ verdict, onRetry }) {
+export default function VerificationResultSummary({ verdict, onRetry, isCreatingSession = false }) {
   if (!verdict) return null;
 
   const isVerified = verdict.outcome === VERIFICATION_VERDICT.VERIFIED;
@@ -74,9 +74,14 @@ export default function VerificationResultSummary({ verdict, onRetry }) {
           </div>
 
           <div className="result-actions">
-            <button type="button" className="btn btn-primary btn-small" onClick={() => onRetry?.()}>
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={() => onRetry?.()}
+              disabled={isCreatingSession}
+            >
               <RotateCcw size={13} />
-              <span>Retry Verification</span>
+              <span>{isCreatingSession ? 'Starting New Attempt...' : 'Retry Verification'}</span>
             </button>
           </div>
         </div>

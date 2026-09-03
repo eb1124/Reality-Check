@@ -6,6 +6,15 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    open: false
+    open: false,
+    proxy: {
+      // Same-origin path for the Phase 1 verification-session backend, so
+      // the browser fetch in src/api/sessionApi.js is never cross-origin.
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, '')
+      }
+    }
   }
 });

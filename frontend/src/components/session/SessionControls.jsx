@@ -5,6 +5,7 @@ import { CAMERA_STATUS } from '../../constants/sessionConstants';
 export default function SessionControls({
   cameraStatus,
   isSessionActive,
+  isCreatingSession = false,
   onStartCamera,
   onStopCamera,
   onStartVerification,
@@ -34,9 +35,10 @@ export default function SessionControls({
                 type="button"
                 className="btn btn-success btn-large"
                 onClick={onStartVerification}
+                disabled={isCreatingSession}
               >
                 <Play size={18} />
-                <span>Start Verification</span>
+                <span>{isCreatingSession ? 'Starting Session...' : 'Start Verification'}</span>
               </button>
             ) : (
               <button

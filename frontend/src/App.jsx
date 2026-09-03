@@ -129,6 +129,19 @@ export default function App() {
             />
           )}
 
+          {/* Backend Session Creation Error — surfaced when POST /sessions
+              fails, whether from Start Verification or from a Retry (a retry
+              is itself a fresh POST /sessions). Verification is never
+              silently started/resumed with a local/fake session in this
+              case. Retries whichever action actually failed: startVerification
+              pre-attempt (session not active yet), retry mid-attempt. */}
+          {orchestrator.sessionError && (
+            <ErrorBanner
+              error={orchestrator.sessionError}
+              onRetry={isSessionActive ? orchestrator.retry : orchestrator.startVerification}
+            />
+          )}
+
           {/* Light Challenge Panel (Reality Check MVP: skin reflectance / colour-match response) — kept directly below the camera feed so telemetry never scrolls out of sync with the video during testing. Orchestrated: only offers its consent/start controls once the primary Head-Turn challenge has succeeded. */}
           <LightChallengePanel
             isSessionActive={isSessionActive}
@@ -152,6 +165,7 @@ export default function App() {
           <SessionControls
             cameraStatus={cameraStatus}
             isSessionActive={isSessionActive}
+            isCreatingSession={orchestrator.isCreatingSession}
             onStartCamera={startCamera}
             onStopCamera={handleStopCamera}
             onStartVerification={orchestrator.startVerification}
@@ -160,15 +174,20 @@ export default function App() {
 
           {/* Combined verification verdict — only rendered once the orchestrated
               sequence reaches a result. */}
-          <VerificationResultSummary verdict={orchestrator.verdict} onRetry={orchestrator.retry} />
+          <VerificationResultSummary
+            verdict={orchestrator.verdict}
+            onRetry={orchestrator.retry}
+            isCreatingSession={orchestrator.isCreatingSession}
+          />
 
           {/* Active Challenge Engine Slot (Phase 3: Turn Head Left) — orchestrated:
-              direction is randomly assigned, manual selection is hidden. */}
+              direction is server-assigned, manual selection is hidden. */}
           <ChallengeSlot
             isSessionActive={isSessionActive}
             challengeEngine={challengeEngine}
             orchestrated
             onOrchestratedRetry={orchestrator.retry}
+            retryDisabled={orchestrator.isCreatingSession}
           />
 
           {/* Real-Time Face Landmark Analysis Telemetry */}

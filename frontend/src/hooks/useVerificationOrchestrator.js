@@ -1,17 +1,23 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { CHALLENGE_STATE, CHALLENGE_TYPES } from '../constants/challengeConstants';
 import { LIGHT_CHALLENGE_STATE } from '../constants/lightChallengeConstants';
+import { createVerificationSession } from '../api/sessionApi';
 
 /**
  * Verification orchestration — sequences the existing, unmodified Head-Turn
  * and Light Challenge engines into one coherent flow with a single combined
- * verdict. Owns no detection logic itself: only sequencing, randomized
- * direction selection, consent gating, and verdict aggregation.
+ * verdict. Owns no detection logic itself: only sequencing, backend session
+ * creation, consent gating, and verdict aggregation.
  *
  * Head Turn is the PRIMARY required challenge. Light Challenge is a
  * SECONDARY supplementary signal — its outcome is always reported, never
  * gates VERIFIED/NOT VERIFIED (see verdict logic below), consistent with
  * useLightChallengeEngine's own "supplementary signal only" design intent.
+ *
+ * The Head-Turn direction is server-assigned: starting a verification (and
+ * every retry — a retry is a brand-new attempt) creates a backend session
+ * (POST /sessions), and the direction it returns — never a client-side
+ * random pick — is what's fed into the challenge engine.
  */
 export const ORCH_PHASE = {
   IDLE: 'ORCH_IDLE',
@@ -27,11 +33,10 @@ export const VERIFICATION_VERDICT = {
   INCOMPLETE_RETRY: 'INCOMPLETE_RETRY'
 };
 
-const DIRECTIONS = [CHALLENGE_TYPES.TURN_HEAD_LEFT, CHALLENGE_TYPES.TURN_HEAD_RIGHT];
-
-function pickRandomDirection() {
-  return DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)];
-}
+const DIRECTION_TO_CHALLENGE_TYPE = {
+  LEFT: CHALLENGE_TYPES.TURN_HEAD_LEFT,
+  RIGHT: CHALLENGE_TYPES.TURN_HEAD_RIGHT
+};
 
 const LIGHT_TERMINAL_STATES = [
   LIGHT_CHALLENGE_STATE.PASS,
@@ -49,16 +54,30 @@ export function useVerificationOrchestrator({
 }) {
   const [orchPhase, setOrchPhase] = useState(ORCH_PHASE.IDLE);
   const [verdict, setVerdict] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [sessionError, setSessionError] = useState(null);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
 
   const orchPhaseRef = useRef(orchPhase);
   orchPhaseRef.current = orchPhase;
 
-  // Camera/session drop -> reset cleanly, no stale verdict, regardless of
-  // which phase the sequence was in.
+  // The server-assigned direction for the most recently created backend
+  // session (set by beginNewSession — see below), consumed once the
+  // session is actually applied to the challenge engine.
+  const serverDirectionRef = useRef(null);
+  // Guards against a double backend session being created if Start/Retry
+  // is clicked again while a POST /sessions call is already in flight.
+  const isStartingRef = useRef(false);
+
+  // Camera/session drop -> reset cleanly, no stale verdict or session,
+  // regardless of which phase the sequence was in.
   useEffect(() => {
     if (!isCameraActive || !isSessionActive) {
       setOrchPhase(ORCH_PHASE.IDLE);
       setVerdict(null);
+      setSessionId(null);
+      setSessionError(null);
+      serverDirectionRef.current = null;
     } else if (orchPhaseRef.current === ORCH_PHASE.IDLE) {
       setOrchPhase(ORCH_PHASE.READY);
     }
@@ -101,14 +120,44 @@ export function useVerificationOrchestrator({
     }
   }, [orchPhase, lightChallengeEngine.challengeState, lightChallengeEngine.invalidReason, lightChallengeEngine.telemetry]);
 
-  const startVerification = useCallback(() => {
+  // Shared by startVerification and retry — both a fresh start and a retry
+  // are, from the backend's point of view, the same thing: a new session.
+  // Authoritative session + direction always come from the backend; on any
+  // failure this throws nothing and returns null, so callers never proceed
+  // with a local/fake session or a stale direction.
+  const beginNewSession = useCallback(async () => {
+    if (isStartingRef.current) return null;
+    isStartingRef.current = true;
+    setSessionError(null);
+    setIsCreatingSession(true);
+    try {
+      const session = await createVerificationSession();
+      const direction = DIRECTION_TO_CHALLENGE_TYPE[session.headTurnDirection];
+      serverDirectionRef.current = direction;
+      setSessionId(session.sessionId);
+      return direction;
+    } catch (err) {
+      setSessionError(err);
+      return null;
+    } finally {
+      setIsCreatingSession(false);
+      isStartingRef.current = false;
+    }
+  }, []);
+
+  const startVerification = useCallback(async () => {
     if (!isCameraActive) return;
-    const direction = pickRandomDirection();
+    const direction = await beginNewSession();
+    if (!direction) return;
+    // The camera/session may have been stopped while the new session was
+    // being created — if so, orchPhase is already back to IDLE (reset
+    // effect above) and this must not resurrect a stale attempt.
+    if (orchPhaseRef.current === ORCH_PHASE.IDLE) return;
     challengeEngine.selectChallengeType(direction);
     setVerdict(null);
     setOrchPhase(ORCH_PHASE.HEAD_TURN);
     startSession();
-  }, [isCameraActive, challengeEngine, startSession]);
+  }, [isCameraActive, challengeEngine, startSession, beginNewSession]);
 
   const acceptLightConsent = useCallback(() => {
     if (orchPhaseRef.current !== ORCH_PHASE.LIGHT_CONSENT) return;
@@ -126,18 +175,29 @@ export function useVerificationOrchestrator({
     setOrchPhase(ORCH_PHASE.COMPLETE);
   }, []);
 
-  const retry = useCallback(() => {
+  // Retry = a brand-new verification attempt: a fresh backend session with
+  // its own sessionId and its own server-assigned direction, never a
+  // replay of the previous attempt's direction.
+  const retry = useCallback(async () => {
     if (!isCameraActive || !isSessionActive) return;
-    const direction = pickRandomDirection();
+    const direction = await beginNewSession();
+    if (!direction) return;
+    // The camera/session may have been stopped while the new session was
+    // being created — if so, orchPhase is already back to IDLE (reset
+    // effect above) and this retry must not resurrect a stale attempt.
+    if (orchPhaseRef.current === ORCH_PHASE.IDLE) return;
     lightChallengeEngine.resetEngine();
     challengeEngine.retryChallenge(direction);
     setVerdict(null);
     setOrchPhase(ORCH_PHASE.HEAD_TURN);
-  }, [isCameraActive, isSessionActive, challengeEngine, lightChallengeEngine]);
+  }, [isCameraActive, isSessionActive, challengeEngine, lightChallengeEngine, beginNewSession]);
 
   return {
     orchPhase,
     verdict,
+    sessionId,
+    sessionError,
+    isCreatingSession,
     isOrchestrated: orchPhase !== ORCH_PHASE.IDLE,
     awaitingLightConsent: orchPhase === ORCH_PHASE.LIGHT_CONSENT,
     startVerification,

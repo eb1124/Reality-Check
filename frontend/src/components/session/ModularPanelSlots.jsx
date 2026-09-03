@@ -23,7 +23,8 @@ export function ChallengeSlot({
   isSessionActive,
   challengeEngine,
   orchestrated = false,
-  onOrchestratedRetry
+  onOrchestratedRetry,
+  retryDisabled = false
 }) {
   const [showTelemetry, setShowTelemetry] = useState(true);
 
@@ -257,9 +258,14 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-secondary btn-small" onClick={handleRetry}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-small"
+                onClick={handleRetry}
+                disabled={orchestrated && retryDisabled}
+              >
                 <RefreshCw size={13} />
-                <span>Test Again</span>
+                <span>{orchestrated && retryDisabled ? 'Starting New Attempt...' : 'Test Again'}</span>
               </button>
             </div>
           </div>
@@ -278,9 +284,14 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                onClick={handleRetry}
+                disabled={orchestrated && retryDisabled}
+              >
                 <RefreshCw size={13} />
-                <span>Retry Challenge</span>
+                <span>{orchestrated && retryDisabled ? 'Starting New Attempt...' : 'Retry Challenge'}</span>
               </button>
             </div>
           </div>
@@ -299,9 +310,14 @@ export function ChallengeSlot({
             </div>
 
             <div className="result-actions">
-              <button type="button" className="btn btn-primary btn-small" onClick={handleRetry}>
+              <button
+                type="button"
+                className="btn btn-primary btn-small"
+                onClick={handleRetry}
+                disabled={orchestrated && retryDisabled}
+              >
                 <RefreshCw size={13} />
-                <span>Retry Challenge</span>
+                <span>{orchestrated && retryDisabled ? 'Starting New Attempt...' : 'Retry Challenge'}</span>
               </button>
             </div>
           </div>
