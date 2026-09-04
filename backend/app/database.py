@@ -57,6 +57,58 @@ def init_db() -> None:
             conn.execute("ALTER TABLE sessions ADD COLUMN head_turn_outcome TEXT")
         if "light_challenge_outcome" not in existing_columns:
             conn.execute("ALTER TABLE sessions ADD COLUMN light_challenge_outcome TEXT")
+
+        # Phase 7: continuous-session tables. Deliberately new tables, not an
+        # extension of `sessions` above (see continuous_models.py's module
+        # docstring for why) — so this is purely additive and never touches
+        # the sessions table or its existing rows. Every existing `sessions`
+        # row is entirely outside this new state machine and needs no
+        # migration of its own; CREATE TABLE IF NOT EXISTS is itself the
+        # complete, idempotent migration for these three tables.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS continuous_sessions (
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                env TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                ended_at TEXT,
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                risk_state TEXT,
+                risk_escalated INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                continuous_session_id TEXT NOT NULL REFERENCES continuous_sessions(id),
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                server_timestamp TEXT NOT NULL,
+                client_offset_ms INTEGER,
+                metadata TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_challenges (
+                id TEXT PRIMARY KEY,
+                continuous_session_id TEXT NOT NULL REFERENCES continuous_sessions(id),
+                challenge_type TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                resolved_at TEXT,
+                detail TEXT
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
