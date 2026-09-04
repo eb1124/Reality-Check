@@ -50,7 +50,19 @@ export function useVerificationOrchestrator({
   isSessionActive,
   startSession,
   challengeEngine,
-  lightChallengeEngine
+  lightChallengeEngine,
+  // Phase 7 continuous-session support. Undefined/omitted -> byte-identical
+  // one-shot behavior (the default, used by App.jsx). When present, the
+  // three terminal-state branches below report to
+  // continuous.onChallengeResolved and return to READY instead of ever
+  // reaching ORCH_COMPLETE, and runContinuousChallenge() (not
+  // startVerification/retry) is the entry point. This orchestrator is
+  // reused, not duplicated, for continuous mode specifically so that only
+  // one state machine ever drives challengeEngine/lightChallengeEngine —
+  // a second, independently-driven consumer of the same engines would be
+  // able to race the one below for the same camera.
+  // continuous: { enabled: boolean, onChallengeResolved: (outcome) => void }
+  continuous
 }) {
   const [orchPhase, setOrchPhase] = useState(ORCH_PHASE.IDLE);
   const [verdict, setVerdict] = useState(null);
@@ -92,6 +104,26 @@ export function useVerificationOrchestrator({
   useEffect(() => {
     if (orchPhase !== ORCH_PHASE.HEAD_TURN) return;
     const s = challengeEngine.challengeState;
+
+    if (continuous?.enabled) {
+      // Continuous mode: a standalone challenge, not the first half of a
+      // paired Head-Turn -> Light sequence — ANY terminal state (including
+      // SUCCESS) resolves and returns to READY (passive monitoring), never
+      // ORCH_COMPLETE. There is no per-challenge Light Consent step in this
+      // mode (consent is obtained once, up front, for the whole continuous
+      // session).
+      if (s === CHALLENGE_STATE.SUCCESS || s === CHALLENGE_STATE.TIMEOUT || s === CHALLENGE_STATE.INVALID) {
+        continuous.onChallengeResolved({
+          type: challengeEngine.currentChallengeType,
+          state: s,
+          reason: challengeEngine.invalidReason || null
+        });
+        challengeEngine.resetEngine();
+        setOrchPhase(ORCH_PHASE.READY);
+      }
+      return;
+    }
+
     if (s === CHALLENGE_STATE.SUCCESS) {
       setOrchPhase(ORCH_PHASE.LIGHT_CONSENT);
     } else if (s === CHALLENGE_STATE.TIMEOUT || s === CHALLENGE_STATE.INVALID) {
@@ -104,26 +136,34 @@ export function useVerificationOrchestrator({
       });
       setOrchPhase(ORCH_PHASE.COMPLETE);
     }
-  }, [orchPhase, challengeEngine.challengeState, challengeEngine.invalidReason]);
+  }, [orchPhase, challengeEngine.challengeState, challengeEngine.invalidReason, challengeEngine.currentChallengeType, continuous]);
 
   // Light Challenge phase: react to the secondary engine's terminal states.
-  // Any terminal outcome (PASS/INCONCLUSIVE/TIMEOUT/INVALID) yields VERIFIED,
-  // since Head Turn already succeeded and Light never gates the verdict.
+  // One-shot mode: any terminal outcome (PASS/INCONCLUSIVE/TIMEOUT/INVALID)
+  // yields VERIFIED, since Head Turn already succeeded and Light never gates
+  // the verdict. Continuous mode: same terminal states, but reports as a
+  // standalone challenge result and returns to READY instead.
   useEffect(() => {
     if (orchPhase !== ORCH_PHASE.LIGHT_CHALLENGE) return;
     const s = lightChallengeEngine.challengeState;
-    if (LIGHT_TERMINAL_STATES.includes(s)) {
-      setVerdict({
-        outcome: VERIFICATION_VERDICT.VERIFIED,
-        headTurn: { state: CHALLENGE_STATE.SUCCESS, reason: null },
-        light: {
-          state: s,
-          reason: lightChallengeEngine.invalidReason || lightChallengeEngine.telemetry?.resultReason || null
-        }
-      });
-      setOrchPhase(ORCH_PHASE.COMPLETE);
+    if (!LIGHT_TERMINAL_STATES.includes(s)) return;
+
+    const reason = lightChallengeEngine.invalidReason || lightChallengeEngine.telemetry?.resultReason || null;
+
+    if (continuous?.enabled) {
+      continuous.onChallengeResolved({ type: 'LIGHT', state: s, reason });
+      lightChallengeEngine.resetEngine();
+      setOrchPhase(ORCH_PHASE.READY);
+      return;
     }
-  }, [orchPhase, lightChallengeEngine.challengeState, lightChallengeEngine.invalidReason, lightChallengeEngine.telemetry]);
+
+    setVerdict({
+      outcome: VERIFICATION_VERDICT.VERIFIED,
+      headTurn: { state: CHALLENGE_STATE.SUCCESS, reason: null },
+      light: { state: s, reason }
+    });
+    setOrchPhase(ORCH_PHASE.COMPLETE);
+  }, [orchPhase, lightChallengeEngine.challengeState, lightChallengeEngine.invalidReason, lightChallengeEngine.telemetry, continuous]);
 
   // Persist the verdict against its backend session once reached — the
   // authoritative session record otherwise stays PENDING forever, since
@@ -225,6 +265,35 @@ export function useVerificationOrchestrator({
     setOrchPhase(ORCH_PHASE.HEAD_TURN);
   }, [isCameraActive, isSessionActive, challengeEngine, lightChallengeEngine, beginNewSession]);
 
+  // Continuous-session entry point (Phase 7) — the challenge scheduler's
+  // only way to run a challenge; it must never call challengeEngine /
+  // lightChallengeEngine directly itself (see the `continuous` param
+  // comment above). Unlike startVerification/retry, this never creates a
+  // one-shot backend session — the scheduler already obtained a
+  // {challengeId, nonce} from POST /sessions/continuous/{id}/next-challenge
+  // before calling this, and reports the outcome itself once
+  // continuous.onChallengeResolved fires (see the two terminal-state
+  // effects above). No per-challenge Light Consent step: continuous-session
+  // consent is obtained once, up front, for the whole monitoring session.
+  const runContinuousChallenge = useCallback((challengeType) => {
+    if (!continuous?.enabled) return;
+    if (!isCameraActive) return;
+    // READY-only, mirroring the single-flight guard the scheduler itself
+    // already enforces — defense in depth, same layering style as
+    // isStartingRef above guarding against a double beginNewSession call.
+    if (orchPhaseRef.current !== ORCH_PHASE.READY) return;
+    setVerdict(null);
+    if (challengeType === 'LIGHT') {
+      setOrchPhase(ORCH_PHASE.LIGHT_CHALLENGE);
+      startSession();
+      lightChallengeEngine.startLightChallenge();
+    } else {
+      challengeEngine.selectChallengeType(challengeType);
+      setOrchPhase(ORCH_PHASE.HEAD_TURN);
+      startSession();
+    }
+  }, [continuous, isCameraActive, challengeEngine, lightChallengeEngine, startSession]);
+
   return {
     orchPhase,
     verdict,
@@ -236,6 +305,7 @@ export function useVerificationOrchestrator({
     startVerification,
     acceptLightConsent,
     declineLightConsent,
-    retry
+    retry,
+    runContinuousChallenge
   };
 }
