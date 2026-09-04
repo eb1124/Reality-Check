@@ -141,18 +141,53 @@ def test_no_challenge_issued_after_end(client):
     assert response.status_code == 409
 
 
-def test_challenge_result_rejected_after_session_ended(client):
+def test_challenge_result_rejected_after_session_ended_and_does_not_mutate(client):
+    # The failure mode that matters isn't the 409 itself, it's a handler that
+    # returns 409 but has already written the challenge resolution/event
+    # before the terminal-state check short-circuits. Assert the challenge
+    # stays PENDING (and the report's pass/fail counts stay at zero) after
+    # the rejected attempt, not just that the HTTP call returned an error.
     session_id = _create_active(client)
     challenge = client.get(f"/sessions/continuous/{session_id}/next-challenge").json()
     client.post(f"/sessions/continuous/{session_id}/end")
+    before = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert before["challenges"] == {"requested": 1, "passed": 0, "failed": 0}
+
     response = client.post(
         f"/sessions/continuous/{session_id}/challenges/{challenge['challengeId']}/result",
         json={"nonce": challenge["nonce"], "outcome": "PASSED"},
     )
     assert response.status_code == 409
 
+    after = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert after == before
+    assert after["challenges"] == {"requested": 1, "passed": 0, "failed": 0}
+
+
+def test_events_rejected_after_cancelled_and_does_not_mutate(client):
+    # The terminal-state guard is a single `state != ACTIVE` check shared by
+    # every write function (see continuous_models.py) — not special-cased
+    # per terminal state. This confirms it actually fires for CANCELLED too,
+    # not only for the ENDED path every other test in this file exercises.
+    session_id = _create_active(client)
+    client.post(f"/sessions/continuous/{session_id}/end", json={"reason": "CANCELLED"})
+    before = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert before["state"] == "CANCELLED"
+
+    response = client.post(
+        f"/sessions/continuous/{session_id}/events",
+        json={"events": [{"eventType": "face_missing", "severity": "warning"}]},
+    )
+    assert response.status_code == 409
+
+    after = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert after == before
+
 
 def test_second_end_call_rejected_and_does_not_mutate(client):
+    # Covers the third write verb (§7): a second end call against an
+    # already-terminal session must be rejected AND must not overwrite the
+    # first, legitimate terminal state/report.
     session_id = _create_active(client)
     first = client.post(f"/sessions/continuous/{session_id}/end")
     assert first.status_code == 200
