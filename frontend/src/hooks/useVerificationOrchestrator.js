@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { CHALLENGE_STATE, CHALLENGE_TYPES } from '../constants/challengeConstants';
 import { LIGHT_CHALLENGE_STATE } from '../constants/lightChallengeConstants';
-import { createVerificationSession } from '../api/sessionApi';
+import { createVerificationSession, submitVerificationResult } from '../api/sessionApi';
 
 /**
  * Verification orchestration — sequences the existing, unmodified Head-Turn
@@ -68,6 +68,11 @@ export function useVerificationOrchestrator({
   // Guards against a double backend session being created if Start/Retry
   // is clicked again while a POST /sessions call is already in flight.
   const isStartingRef = useRef(false);
+  // Tracks which sessionId's verdict has already been POSTed to the backend,
+  // so the result-persistence effect below fires exactly once per session
+  // (React effects can re-run on unrelated re-renders) rather than once per
+  // render where orchPhase/verdict/sessionId all happen to be set.
+  const resultSubmittedForSessionRef = useRef(null);
 
   // Camera/session drop -> reset cleanly, no stale verdict or session,
   // regardless of which phase the sequence was in.
@@ -120,6 +125,25 @@ export function useVerificationOrchestrator({
     }
   }, [orchPhase, lightChallengeEngine.challengeState, lightChallengeEngine.invalidReason, lightChallengeEngine.telemetry]);
 
+  // Persist the verdict against its backend session once reached — the
+  // authoritative session record otherwise stays PENDING forever, since
+  // POST /sessions/{id}/result is the only thing that ever finalizes it.
+  // Best-effort: a failure here never alters or blocks the result already
+  // shown to the user (see submitVerificationResult docstring for the
+  // client-reported-evidence trust model this relies on).
+  useEffect(() => {
+    if (orchPhase !== ORCH_PHASE.COMPLETE || !verdict || !sessionId) return;
+    if (resultSubmittedForSessionRef.current === sessionId) return;
+    resultSubmittedForSessionRef.current = sessionId;
+    submitVerificationResult(sessionId, {
+      outcome: verdict.outcome,
+      headTurnOutcome: verdict.headTurn?.state ?? null,
+      lightChallengeOutcome: verdict.light?.state ?? null
+    }).catch((err) => {
+      console.warn('Failed to persist verification result to backend session:', err);
+    });
+  }, [orchPhase, verdict, sessionId]);
+
   // Shared by startVerification and retry — both a fresh start and a retry
   // are, from the backend's point of view, the same thing: a new session.
   // Authoritative session + direction always come from the backend; on any
@@ -147,8 +171,17 @@ export function useVerificationOrchestrator({
 
   const startVerification = useCallback(async () => {
     if (!isCameraActive) return;
+    
+    // Explicitly transition out of IDLE before creating a session so
+    // our own race-condition check doesn't falsely abort the start.
+    setOrchPhase(ORCH_PHASE.READY);
+    
     const direction = await beginNewSession();
-    if (!direction) return;
+    if (!direction) {
+      // Revert if backend fails so we aren't stuck in READY
+      setOrchPhase(ORCH_PHASE.IDLE);
+      return;
+    }
     // The camera/session may have been stopped while the new session was
     // being created — if so, orchPhase is already back to IDLE (reset
     // effect above) and this must not resurrect a stale attempt.

@@ -37,7 +37,7 @@ const PROVISIONAL_YAW_THRESHOLD_DEG = 15;
  * CHALLENGE_ACTIVE before treating tracking loss as a real invalidation.
  * Starting value only — not yet tuned against real dropout data.
  */
-export const FACE_LOSS_GRACE_MS = 400;
+export const FACE_LOSS_GRACE_MS = 1200; // Extended from 400ms: MediaPipe can briefly lose tracking during a head turn as the face goes to profile; 1200ms gives the detector time to re-acquire without falsely invalidating a genuine turn attempt.
 
 /**
  * Challenge configuration parameters — matrix-derived head yaw (degrees) with

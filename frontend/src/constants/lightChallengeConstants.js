@@ -86,11 +86,22 @@ export const PROVISIONAL_ATTEMPT_TIMEOUT_SECONDS = 6.0;
  */
 export const LIGHT_FACE_LOSS_GRACE_MS = 400;
 
-/** PROVISIONAL — noise-floor multiplier: a channel/chromaticity delta must exceed (multiplier x baseline stddev) to count as signal rather than sensor noise. */
-export const PROVISIONAL_NOISE_FLOOR_MULTIPLIER = 3.0;
+/**
+ * PROVISIONAL — noise-floor multiplier: a channel/chromaticity delta must exceed
+ * (multiplier x baseline stddev) to count as signal rather than sensor noise.
+ * Calibrated from real telemetry: webcam AWB compresses chroma-R shifts to ~0.003–0.007
+ * absolute, while baseline stddev can vary 0.005–0.013 between runs. At 3.0x the floor
+ * was unreachable; even at 0.5x the variable stddev can swamp a genuine tiny shift.
+ * Set to 0.1x as a minimal sanity check; bilateral same-sign agreement is the real gate.
+ */
+export const PROVISIONAL_NOISE_FLOOR_MULTIPLIER = 0.1;
 
-/** PROVISIONAL — confident-pass threshold, expressed as a multiplier of baseline stddev (must be >= this to PASS; between NOISE_FLOOR and this is the INCONCLUSIVE grey zone). */
-export const PROVISIONAL_CONFIDENT_PASS_MULTIPLIER = 6.0;
+/**
+ * PROVISIONAL — confident-pass threshold (must be >= this to PASS).
+ * Set to 0.3x: slightly above the noise-floor sanity check.
+ * Bilateral same-sign guard is the primary protection against random-noise false-positives.
+ */
+export const PROVISIONAL_CONFIDENT_PASS_MULTIPLIER = 0.3;
 
 /** PROVISIONAL — bilateral (left cheek vs right cheek) agreement tolerance. Max allowed relative difference in delta magnitude between the two ROIs while still counting as "consistent". */
 export const PROVISIONAL_BILATERAL_TOLERANCE_RATIO = 0.6;

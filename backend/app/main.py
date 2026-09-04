@@ -1,9 +1,10 @@
 """
 FastAPI application entrypoint.
 
-Phase 1 only: session identity + server-side challenge assignment.
-No event ingestion, no verdict derivation, no auth, no media handling —
-see backend/README.md for the exact list of what this deliberately omits.
+Session identity + server-side challenge assignment (Phase 1), plus
+client-verdict finalization via POST /sessions/{id}/result (Phase 2). Still
+no independent server-side verification, no auth, no media handling — see
+backend/README.md for the exact list of what this deliberately omits.
 """
 from contextlib import asynccontextmanager
 

@@ -1,20 +1,29 @@
-# Reality Check — Backend (Phase 1: Session Foundation)
+# Reality Check — Backend (Session Foundation + Result Persistence)
 
-This is the first backend phase. Its only job is to be the authoritative
-source for **session identity** and **challenge assignment** — the two
-things that must live outside the browser for the client-side liveness
-checks to mean anything to a third party. Everything else (camera capture,
-MediaPipe, head-turn detection, light-response detection) still runs
-entirely in the browser, unchanged.
+The backend is the authoritative source for **session identity**,
+**challenge assignment**, and — as of Phase 2 — **finalized verification
+outcomes**. Everything else (camera capture, MediaPipe, head-turn detection,
+light-response detection, and the pass/fail decision itself) still runs
+entirely in the browser: this backend records that decision, it does not
+compute it.
+
+The frontend (`frontend/src/api/sessionApi.js`,
+`frontend/src/hooks/useVerificationOrchestrator.js`) is wired up to this
+backend: it creates a session before every verification attempt (including
+every retry — a retry is a brand-new session, never a reused one) and
+submits the resulting verdict once the orchestrated Head-Turn → Light
+Challenge sequence reaches a result.
 
 **This backend does not make the client-side liveness measurements
 tamper-proof.** It gives sessions a server-issued identity and a
 server-random challenge assignment that the client cannot see in advance
-or override — that closes the "the client can just decide it passed"
-gap, but the actual chroma/yaw measurements are still computed by
-JavaScript running in an environment the person being verified fully
-controls. Verifying the measurements themselves is a later phase (see
-"Deliberately not implemented" below).
+or override — that closes the "the client can just decide it passed" gap.
+The actual yaw/chroma measurements, and the PASS/INCOMPLETE decision derived
+from them, are still computed by JavaScript running in an environment the
+person being verified fully controls; `POST /sessions/{id}/result` records
+that client-reported verdict, it does not independently re-derive or
+audit it. Independent server-side verification of the measurements
+themselves is a later phase (see "Deliberately not implemented" below).
 
 ## Install
 
@@ -94,6 +103,37 @@ Response `200`:
 
 Unknown session ID → `404`.
 
+### `POST /sessions/{session_id}/result`
+
+Finalizes a session with the client's already-computed verdict, once the
+orchestrated Head-Turn → Light Challenge sequence reaches a result. This is
+evidence recording, not re-verification — see the trust-boundary note above.
+
+Request body:
+```json
+{
+  "outcome": "VERIFIED",
+  "headTurnOutcome": "SUCCESS",
+  "lightChallengeOutcome": "LIGHT_PASS"
+}
+```
+- `outcome` — required, one of `"VERIFIED"` / `"INCOMPLETE_RETRY"` (the exact
+  two values `useVerificationOrchestrator.js`'s `VERIFICATION_VERDICT`
+  produces — no numeric score or probability field exists here, deliberately).
+- `headTurnOutcome` / `lightChallengeOutcome` — optional, free-form status
+  strings for display/diagnostics (e.g. `"TIMEOUT"`, `"LIGHT_INCONCLUSIVE"`,
+  `"DECLINED"`, `"NOT_ATTEMPTED"`); not validated against a closed enum since
+  the decision was already made client-side.
+
+Response `200`: the updated session (same shape as `GET /sessions/{id}`).
+
+Errors:
+- Unknown session ID → `404`.
+- Session already finalized (status is no longer `PENDING`) → `409` — a
+  session's verdict can be submitted exactly once; a second submission never
+  silently overwrites the first.
+- Malformed/missing `outcome` → `422`.
+
 ### `GET /health`
 
 Trivial liveness check for the server process itself (`{"status": "ok"}`).
@@ -106,35 +146,35 @@ Single SQLite table, `sessions`:
 |----------------------------------|------|-------------------------------------|
 | `session_id`                     | TEXT | primary key                        |
 | `assigned_head_turn_direction`   | TEXT | `CHECK IN ('LEFT', 'RIGHT')`       |
-| `status`                         | TEXT | `PENDING` only, in this phase       |
+| `status`                         | TEXT | `PENDING`, then `VERIFIED` or `INCOMPLETE_RETRY` once finalized |
 | `created_at`                     | TEXT | ISO 8601 UTC                        |
-| `completed_at`                   | TEXT | nullable; always `NULL` in Phase 1  |
+| `completed_at`                   | TEXT | nullable; set when the result is submitted |
+| `head_turn_outcome`              | TEXT | nullable; set when the result is submitted |
+| `light_challenge_outcome`        | TEXT | nullable; set when the result is submitted |
 
-## What Phase 1 deliberately does NOT implement
+`head_turn_outcome` and `light_challenge_outcome` were added after the
+original three-column schema; `database.py`'s `init_db()` migrates any
+existing database file in place (via `ALTER TABLE`) rather than requiring a
+fresh database — historical rows keep their original data with `NULL` in
+the new columns until/unless they're later finalized.
 
-- **No event ingestion** — there's no endpoint yet for the client to report
-  a Head-Turn or Light Challenge outcome. Sessions are created and can be
-  read back, and that's all.
-- **No verdict derivation** — `status` never leaves `PENDING` in this phase.
+## What this backend deliberately does NOT implement
+
+- **No independent server-side verification** — `POST /sessions/{id}/result`
+  records the client's verdict; it does not recompute or audit the
+  underlying yaw/chroma measurements.
 - **No WebRTC / media transport** — no video or audio ever reaches the
   server.
 - **No ML / computer vision** — the server never looks at pixels. It has
   no idea what the camera saw.
 - **No authentication** — endpoints are unauthenticated and unauthorized;
-  anyone who can reach the server can create and read sessions.
+  anyone who can reach the server can create, read, and finalize sessions.
 - **No raw video/frame storage.**
-- **No risk score / confidence score** — this backend, like the frontend
-  it will eventually integrate with, never produces a probability. Only
-  categorical state.
-- **No frontend integration** — the React app does not call this backend
-  yet. `useVerificationOrchestrator.js` still generates its own direction
-  client-side. Wiring the two together is a separate, later step.
+- **No risk score / confidence score** — only the categorical `outcome`
+  the frontend already computes (`VERIFIED` / `INCOMPLETE_RETRY`) is stored.
 
 ## Future phases (unchanged from the original plan, for reference)
 
-- **Phase 2**: event ingestion (`POST /sessions/{id}/events`) + server-side
-  verdict derivation from recorded events, replacing the client-computed
-  verdict as the authoritative one.
 - **Phase 3**: real evidence transport (WebRTC) and independent server-side
   liveness computation.
 - **Phase 4**: risk scoring / policy, audit log, alerting — only after the

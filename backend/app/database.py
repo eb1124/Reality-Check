@@ -41,10 +41,22 @@ def init_db() -> None:
                     CHECK (assigned_head_turn_direction IN ('LEFT', 'RIGHT')),
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                completed_at TEXT
+                completed_at TEXT,
+                head_turn_outcome TEXT,
+                light_challenge_outcome TEXT
             )
             """
         )
+        # Migration for databases created before the two result-evidence
+        # columns existed (Phase 2). SQLite has no "ADD COLUMN IF NOT
+        # EXISTS", so existing columns are checked via PRAGMA first — this
+        # must stay a no-op on a table that already has them, and must
+        # never touch/reorder/drop existing rows or columns.
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "head_turn_outcome" not in existing_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN head_turn_outcome TEXT")
+        if "light_challenge_outcome" not in existing_columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN light_challenge_outcome TEXT")
         conn.commit()
     finally:
         conn.close()

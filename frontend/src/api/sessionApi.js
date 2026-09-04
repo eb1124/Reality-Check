@@ -50,3 +50,27 @@ export async function createVerificationSession() {
 
   return data;
 }
+
+/**
+ * Persists the already-computed client-side verdict (see
+ * useVerificationOrchestrator's VERIFICATION_VERDICT) against its backend
+ * session, so the session no longer stays PENDING forever once a
+ * verification attempt actually concludes. This is best-effort evidence
+ * recording, not re-verification — the backend does not independently
+ * confirm the measurements, only records what the browser reported (see
+ * backend/README.md's trust-boundary note). Callers should treat failures
+ * here as non-fatal: the result already shown to the user is unaffected.
+ */
+export async function submitVerificationResult(sessionId, { outcome, headTurnOutcome, lightChallengeOutcome }) {
+  const response = await fetch(`${API_BASE}/sessions/${sessionId}/result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outcome, headTurnOutcome, lightChallengeOutcome })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Result submission failed for session ${sessionId} (HTTP ${response.status})`);
+  }
+
+  return response.json();
+}
