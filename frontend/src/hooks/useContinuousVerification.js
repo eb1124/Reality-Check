@@ -61,8 +61,13 @@ function mapToClientOutcome(challengeKind, engineState) {
  * this (consistent with "keep camera teardown reliable... follow whatever
  * guard pattern already exists").
  */
-export function useContinuousVerification({ isCameraActive, videoRef, faceCount }) {
+export function useContinuousVerification({ isCameraActive, videoRef, faceCount, onEvent, onChallenge }) {
   const config = getRealityCheckConfig();
+
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
+  const onChallengeRef = useRef(onChallenge);
+  onChallengeRef.current = onChallenge;
 
   const [state, setState] = useState(CONTINUOUS_STATE.IDLE);
   const [sessionId, setSessionId] = useState(null);
@@ -76,6 +81,16 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
   // resurrect the session or start a challenge.
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // isCameraActive is a plain boolean prop, not a ref — a closure that
+  // captures it (e.g. start(), below) freezes whatever value it was at
+  // closure-creation time. Across an `await` boundary (e.g. awaiting
+  // startCamera() before calling start()), that snapshot goes stale: the
+  // camera can genuinely become active in between, but the closure would
+  // never see it. Mirrored into a ref, read live via .current, exactly
+  // like stateRef above.
+  const isCameraActiveRef = useRef(isCameraActive);
+  isCameraActiveRef.current = isCameraActive;
 
   const [isChallengeRunning, setIsChallengeRunning] = useState(false);
   const isMonitoringActive = state === CONTINUOUS_STATE.ACTIVE || state === CONTINUOUS_STATE.CHALLENGE_ACTIVE;
@@ -110,6 +125,12 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
 
       if (!pending) return;
       const clientOutcome = mapToClientOutcome(pending.type, outcome.state);
+      // Public-interface challenge feed collapses the 4-value backend
+      // outcome to the 3 states the interface documents ('started' |
+      // 'passed' | 'failed') — TIMEOUT/ABORTED both surface as 'failed'
+      // here; the full outcome is still in the eventual report's timeline
+      // for anyone who needs the detail.
+      onChallengeRef.current?.({ status: clientOutcome === 'PASSED' ? 'passed' : 'failed', type: pending.type });
       submitChallengeResult(pending.sessionId, pending.challengeId, {
         nonce: pending.nonce,
         outcome: clientOutcome,
@@ -142,6 +163,7 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
         pendingChallengeRef.current = { ...next, sessionId, type: next.type };
         setState(CONTINUOUS_STATE.CHALLENGE_ACTIVE);
         schedulerControlsRef.current?.markChallengeStarted();
+        onChallengeRef.current?.({ status: 'started', type: next.type });
         orchestrator.runContinuousChallenge(next.type);
       } catch (err) {
         console.warn('Failed to fetch next continuous challenge:', err);
@@ -158,7 +180,8 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
       submitEvents(sessionId, events).catch((err) => console.warn('Failed to flush continuous events:', err));
     },
     onImmediateTrigger: () => schedulerControlsRef.current?.requestEventTrigger(),
-    onSuspiciousEvent: () => schedulerControlsRef.current?.noteSuspiciousEvent()
+    onSuspiciousEvent: () => schedulerControlsRef.current?.noteSuspiciousEvent(),
+    onEvent: (e) => onEventRef.current?.(e)
   });
 
   const schedulerControls = useChallengeScheduler({
@@ -169,27 +192,51 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
   const schedulerControlsRef = useRef(schedulerControls);
   schedulerControlsRef.current = schedulerControls;
 
+  // monitor is a fresh object every render (its methods are individually
+  // stable via useCallback, but the wrapping object isn't memoized) — kept
+  // behind a ref so this effect only re-runs when faceCount itself
+  // actually changes, not on every unrelated re-render.
+  const monitorRef = useRef(monitor);
+  monitorRef.current = monitor;
   useEffect(() => {
     if (!isCameraActive || faceCount === undefined) return;
-    monitor.observeFaceCount(faceCount);
-  }, [faceCount, isCameraActive, monitor]);
+    monitorRef.current.observeFaceCount(faceCount);
+  }, [faceCount, isCameraActive]);
+
+  // Fans each MediaPipe frame out to both challenge engines — identical to
+  // App.jsx's own handleFrame for the one-shot flow. Not itself memoized
+  // (challengeEngine/lightChallengeEngine are fresh objects every render,
+  // same as in App.jsx), which is safe because useFaceLandmarker buffers
+  // onFrame via its own internal ref rather than depending on identity.
+  const processFrame = useCallback(
+    (frame) => {
+      challengeEngine.processFrame(frame);
+      lightChallengeEngine.processFrame(frame);
+    },
+    [challengeEngine, lightChallengeEngine]
+  );
 
   const start = useCallback(async () => {
-    if (!isCameraActive) return;
+    // Read live via the ref, not the captured `isCameraActive` primitive —
+    // the caller (EngineBridge) may call this immediately after awaiting
+    // startCamera(), so by the time this function's body actually runs,
+    // the camera can already be active even though it wasn't at the
+    // moment this particular closure was created.
+    if (!isCameraActiveRef.current) return;
     setStartError(null);
     setState(CONTINUOUS_STATE.STARTING);
     try {
       const created = await createContinuousSession();
-      if (!isCameraActive) { setState(CONTINUOUS_STATE.IDLE); return; } // camera dropped mid-create
+      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return; } // camera dropped mid-create
       await startContinuousSession(created.sessionId);
-      if (!isCameraActive) { setState(CONTINUOUS_STATE.IDLE); return; }
+      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return; }
       setSessionId(created.sessionId);
       setState(CONTINUOUS_STATE.ACTIVE);
     } catch (err) {
       setStartError(err);
       setState(CONTINUOUS_STATE.IDLE);
     }
-  }, [isCameraActive]);
+  }, []);
 
   const end = useCallback(
     async (reason = 'ENDED') => {
@@ -228,7 +275,16 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount 
     startError,
     isChallengeRunning,
     orchPhase: orchestrator.orchPhase,
+    processFrame,
     start,
-    end
+    end,
+    // The Light Challenge's screen flash is a required PHYSICAL side
+    // effect (it has to actually illuminate the person's face for the
+    // measurement to mean anything) — not an internal detail. Exposed as
+    // just these two primitives, not the whole lightChallengeEngine
+    // object, so EngineBridge can render the flash without needing
+    // telemetry/scoring internals.
+    isFlashActive: lightChallengeEngine.isFlashActive,
+    flashColorCss: lightChallengeEngine.flashColorCss
   };
 }

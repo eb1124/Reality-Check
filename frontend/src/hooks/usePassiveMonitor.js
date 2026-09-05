@@ -31,6 +31,7 @@ export function usePassiveMonitor({
   onFlush,
   onImmediateTrigger,
   onSuspiciousEvent,
+  onEvent,
   clock = Date.now,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval
@@ -41,6 +42,8 @@ export function usePassiveMonitor({
   onImmediateTriggerRef.current = onImmediateTrigger;
   const onSuspiciousEventRef = useRef(onSuspiciousEvent);
   onSuspiciousEventRef.current = onSuspiciousEvent;
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
 
   const wasFaceMissingSuspiciousRef = useRef(false);
   const batcherRef = useRef(null);
@@ -54,6 +57,10 @@ export function usePassiveMonitor({
 
   const handleEvent = useCallback((eventType, severity, metadata) => {
     batcherRef.current.add({ eventType, severity, metadata, clientOffsetMs: null });
+    // Public-interface event feed (§9: "event type + severity, no
+    // internals") — every observed event, independent of batching/flush
+    // timing, which is purely a backend-persistence concern.
+    onEventRef.current?.({ eventType, severity });
 
     if (severity === 'suspicious') {
       onSuspiciousEventRef.current?.();
