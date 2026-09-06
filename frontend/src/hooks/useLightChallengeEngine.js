@@ -7,7 +7,8 @@ import {
   computeCheekROIs,
   measureImageData,
   aggregateMeasurements,
-  evaluateLightResponse
+  evaluateLightResponse,
+  computeLightValidity
 } from '../challenges/lightChallenge';
 
 const FULL_FRAME_SAMPLE_WIDTH = 48;
@@ -51,7 +52,15 @@ const EMPTY_TELEMETRY = {
   baselineFrameCount: 0,
   responseFrameCount: 0,
   resultReason: '',
-  responseDiagnostics: null
+  responseDiagnostics: null,
+  // Phase 11 — continuous evidence score/validity (see
+  // challenges/lightChallenge.js's continuousScore/computeLightValidity).
+  // validity: 0 until a real capture-quality measurement exists (TIMEOUT/
+  // INVALID never compute one — an incomplete/unusable attempt must not
+  // silently claim a nonzero validity it never measured).
+  lightScore: 0,
+  lightValidity: 0,
+  lightDiagnostics: null
 };
 
 /**
@@ -102,6 +111,12 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
   const baselineSamplesRef = useRef({ left: [], right: [], full: [] });
   const responseSamplesRef = useRef({ left: [], right: [], full: [] });
   const baselineAggRef = useRef(null);
+  // Phase 11 diagnostics — face coverage per response-window frame and the
+  // response window's own start/actual-sample-count, used to derive
+  // deliveredFps at evaluate time. Kept separate from responseSamplesRef
+  // (measurement vectors) since these feed validity, not the PASS/
+  // INCONCLUSIVE score itself.
+  const responseCoverageRef = useRef([]);
 
   // Diagnostic-only counters (not used by any PASS/INCONCLUSIVE/INVALID decision) —
   // see debugging notes: distinguishes raw RESPONSE-phase processFrame calls from
@@ -118,6 +133,7 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
   const resetBuffers = useCallback(() => {
     baselineSamplesRef.current = { left: [], right: [], full: [] };
     responseSamplesRef.current = { left: [], right: [], full: [] };
+    responseCoverageRef.current = [];
     baselineAggRef.current = null;
     attemptStartTimeRef.current = null;
     phaseStartTimeRef.current = null;
@@ -193,7 +209,14 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
     fullCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, FULL_FRAME_SAMPLE_WIDTH, FULL_FRAME_SAMPLE_HEIGHT);
     const fullMeasurement = measureImageData(fullCtx.getImageData(0, 0, FULL_FRAME_SAMPLE_WIDTH, FULL_FRAME_SAMPLE_HEIGHT));
 
-    return { left: leftMeasurement, right: rightMeasurement, full: fullMeasurement };
+    // Phase 11 — face coverage validity gate: interocular distance relative
+    // to the smaller video dimension, a frame-relative (not absolute-pixel)
+    // measure of how much of the frame the face occupies, reusing the same
+    // interocular measurement computeCheekROIs already derives for ROI
+    // sizing rather than a second, independent face-size computation.
+    const faceCoverageRatio = roi.interocularPx / Math.min(video.videoWidth, video.videoHeight);
+
+    return { left: leftMeasurement, right: rightMeasurement, full: fullMeasurement, faceCoverageRatio };
   }, [config]);
 
   const finishAsInvalid = useCallback((reason) => {
@@ -359,6 +382,7 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
           responseSamplesRef.current.left.push(sample.left);
           responseSamplesRef.current.right.push(sample.right);
           responseSamplesRef.current.full.push(sample.full);
+          responseCoverageRef.current.push(sample.faceCoverageRatio);
         } else {
           responseDiagRef.current.nullSamples++;
         }
@@ -408,6 +432,22 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
           const flashDurationMsUsed = now - flashOnsetTimeRef.current;
           const measuredResponseTime = ((now - attemptStartTimeRef.current) / 1000).toFixed(2);
 
+          // Phase 11 — validity gates, computed from real measurements
+          // taken during this same response window (see
+          // computeLightValidity's docstring for what each gate means).
+          const deliveredFps = (respCount / elapsedResponseMs) * 1000;
+          const meanFaceCoverage =
+            responseCoverageRef.current.reduce((a, b) => a + b, 0) / (responseCoverageRef.current.length || 1);
+          const screenContributionRatio = evalResult.details.relativeDeltaCombined.luminance;
+          const { validity: lightValidity, diagnostics: lightDiagnostics } = computeLightValidity({
+            deliveredFps,
+            faceCoverageRatio: meanFaceCoverage,
+            screenContributionRatio,
+            globalDriftSuspect: evalResult.details.globalDriftSuspect,
+            config
+          });
+          const lightScore = evalResult.score ?? 0;
+
           setTelemetry((prev) => ({
             ...prev,
             response: {
@@ -442,7 +482,10 @@ export function useLightChallengeEngine({ isSessionActive, isCameraActive, video
             baselineFrameCount: baselineSamplesRef.current.left.length,
             responseFrameCount: respCount,
             resultReason: evalResult.reason,
-            responseDiagnostics: { ...responseDiagRef.current }
+            responseDiagnostics: { ...responseDiagRef.current },
+            lightScore,
+            lightValidity,
+            lightDiagnostics
           }));
 
           setResponseTime(measuredResponseTime);

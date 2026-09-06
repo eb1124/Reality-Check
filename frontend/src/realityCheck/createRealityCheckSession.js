@@ -48,6 +48,14 @@ import EngineBridge from './EngineBridge';
  *   read and in the final report, so the OA can associate
  *   `assessmentAttemptId <-> realityCheckSessionId` without Reality Check
  *   depending on the OA's own data model. Max 200 characters.
+ * @param {boolean} [options.disableLightChallenge] - Optional, default
+ *   false. Set true when the candidate has disclosed photosensitive
+ *   epilepsy or a sensitivity to flashing/bright lights (see
+ *   ContinuousConsentGate.jsx) — the backend will then never draw a LIGHT
+ *   challenge for this session. Head Turn (and Depth/Proximity, where
+ *   enabled) are unaffected; the session's risk/report scoring degrades
+ *   cleanly to non-Light evidence exactly as it already does whenever no
+ *   LIGHT challenge happens to run.
  * @param {object} [options.config] - Accepted for interface completeness;
  *   this build's timing/threshold profile is chosen once, at import time,
  *   via VITE_REALITY_CHECK_ENV (see realityCheck/config.js) — there is
@@ -59,7 +67,7 @@ import EngineBridge from './EngineBridge';
  *   end: (reason?: 'ENDED'|'CANCELLED'|'ERROR') => Promise<object|null>
  * }}
  */
-export function createRealityCheckSession({ videoElement, mediaStream, apiBaseUrl, externalRef } = {}) {
+export function createRealityCheckSession({ videoElement, mediaStream, apiBaseUrl, externalRef, disableLightChallenge } = {}) {
   const listeners = { event: [], challenge: [] };
   let status = { state: 'IDLE', riskState: null, challengesRun: 0, sessionId: null };
   let started = false;
@@ -90,6 +98,7 @@ export function createRealityCheckSession({ videoElement, mediaStream, apiBaseUr
         mediaStream,
         apiBaseUrl,
         externalRef,
+        disableLightChallenge,
         onStatus: (s) => { status = s; },
         onEvent: (e) => emit('event', e),
         onChallenge: (c) => emit('challenge', c),

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChallengeEngine } from './useChallengeEngine';
 import { useLightChallengeEngine } from './useLightChallengeEngine';
+import { useDepthProximityEngine } from './useDepthProximityEngine';
 import { useVerificationOrchestrator } from './useVerificationOrchestrator';
 import { useChallengeScheduler } from './useChallengeScheduler';
 import { usePassiveMonitor } from './usePassiveMonitor';
@@ -15,6 +16,7 @@ import {
 import { getRealityCheckConfig } from '../realityCheck/config';
 import { CHALLENGE_STATE } from '../constants/challengeConstants';
 import { LIGHT_CHALLENGE_STATE } from '../constants/lightChallengeConstants';
+import { DEPTH_PROXIMITY_STATE } from '../constants/depthProximityConstants';
 
 export const CONTINUOUS_STATE = {
   IDLE: 'IDLE',
@@ -27,21 +29,50 @@ export const CONTINUOUS_STATE = {
 
 // Maps the real (unmodified) challenge-engine terminal states onto the
 // fixed backend vocabulary (continuous_types.CHALLENGE_CLIENT_OUTCOMES:
-// PASSED/FAILED/TIMEOUT/ABORTED — no INCONCLUSIVE slot exists, per §5's
-// fixed event vocabulary, which has no "challenge_inconclusive" event
-// type). LIGHT_INCONCLUSIVE is deliberately mapped to ABORTED rather than
-// FAILED: ABORTED carries 'warning' severity server-side (see
+// PASSED/FAILED/TIMEOUT/ABORTED — no INCONCLUSIVE/INVALID slot exists, per
+// §5's fixed event vocabulary, which has no "challenge_inconclusive" event
+// type). LIGHT_INCONCLUSIVE and LIGHT_INVALID are BOTH mapped to ABORTED,
+// not FAILED: ABORTED carries 'warning' severity server-side (see
 // continuous_models.py's _RESULT_SEVERITY_BY_OUTCOME), which does NOT
 // contribute failure points to the risk score — preserving the existing
 // Light Challenge design's own "inconclusive is not a failure, only a
 // supplementary signal" intent (see lightChallenge.js's module docstring)
 // even though continuous mode now scores challenges individually.
+//
+// Phase 11 fix: LIGHT_INVALID used to map to FAILED here, which is wrong —
+// LIGHT_INVALID means the measurement itself was unusable (face tracking
+// lost, multiple faces, insufficient ambient light, too few valid samples;
+// see useLightChallengeEngine.js's finishAsInvalid call sites), never that
+// the candidate produced a suspicious/wrong response. Treating an unusable
+// measurement as a failure double-penalized capture-quality problems the
+// candidate didn't cause (see fusion.py's validity concept — an invalid
+// Light attempt should carry v_light = 0 and disappear from evidence, not
+// masquerade as a challenge_failed suspicion event). DEPTH_PROXIMITY
+// already gets this distinction right below (its own INCONCLUSIVE, a
+// tracking/quality problem, maps to ABORTED while its distinct FAILED
+// state — a genuine wrong-direction movement — maps to FAILED); Light's
+// engine has no such "wrong response" state at all (its evaluator only
+// ever returns PASS or INCONCLUSIVE categorically), so every one of its
+// non-PASS/TIMEOUT terminal states is a quality problem, never a verdict.
 export function mapToClientOutcome(challengeKind, engineState) {
   if (challengeKind === 'LIGHT') {
     if (engineState === LIGHT_CHALLENGE_STATE.PASS) return 'PASSED';
-    if (engineState === LIGHT_CHALLENGE_STATE.INCONCLUSIVE) return 'ABORTED';
     if (engineState === LIGHT_CHALLENGE_STATE.TIMEOUT) return 'TIMEOUT';
-    return 'FAILED'; // LIGHT_INVALID
+    return 'ABORTED'; // LIGHT_INCONCLUSIVE or LIGHT_INVALID
+  }
+  if (challengeKind === 'DEPTH_PROXIMITY') {
+    // Phase 10: DEPTH_INCONCLUSIVE (tracking/measurement quality was
+    // insufficient — face loss, multi-face, abrupt/discontinuous scale
+    // jump, excessive pose change, or an already-too-close baseline) is
+    // mapped to ABORTED, not FAILED, for the same reason LIGHT_INCONCLUSIVE
+    // is above: a quality problem is not evidence the candidate did the
+    // wrong thing, and must not carry challenge_failed's risk weight.
+    // DEPTH_FAILED is a genuine, distinct state (sustained movement in the
+    // wrong direction with good tracking) and does map to FAILED.
+    if (engineState === DEPTH_PROXIMITY_STATE.PASS) return 'PASSED';
+    if (engineState === DEPTH_PROXIMITY_STATE.INCONCLUSIVE) return 'ABORTED';
+    if (engineState === DEPTH_PROXIMITY_STATE.TIMEOUT) return 'TIMEOUT';
+    return 'FAILED'; // DEPTH_FAILED
   }
   if (engineState === CHALLENGE_STATE.SUCCESS) return 'PASSED';
   if (engineState === CHALLENGE_STATE.TIMEOUT) return 'TIMEOUT';
@@ -85,6 +116,11 @@ export function useContinuousVerification({
   // attached once at session creation — see continuous_schemas.py's
   // CreateContinuousSessionRequest.
   externalRef,
+  // Phase 11: the candidate's own photosensitivity disclosure at the
+  // consent gate (see ContinuousConsentGate.jsx) — attached once at
+  // session creation, same as externalRef. True permanently excludes
+  // LIGHT from this session's server-drawn challenge pool.
+  disableLightChallenge,
   // Test-only timer overrides for the scheduler's polling loop, threaded
   // straight through to useChallengeScheduler (see that hook's own params).
   // Default to the real global timers, so this is a no-op in production —
@@ -110,6 +146,8 @@ export function useContinuousVerification({
   apiBaseUrlRef.current = apiBaseUrl;
   const externalRefRef = useRef(externalRef);
   externalRefRef.current = externalRef;
+  const disableLightChallengeRef = useRef(disableLightChallenge);
+  disableLightChallengeRef.current = disableLightChallenge;
 
   // Set once start() actually reaches ACTIVE; lets every passively-observed
   // event carry a clientOffsetMs (ms since monitoring began) alongside the
@@ -157,6 +195,11 @@ export function useContinuousVerification({
     isCameraActive,
     videoRef
   });
+  const depthProximityEngine = useDepthProximityEngine({
+    isSessionActive: isChallengeRunning,
+    isCameraActive,
+    videoRef
+  });
 
   const pendingChallengeRef = useRef(null); // { challengeId, nonce, type }
 
@@ -181,13 +224,42 @@ export function useContinuousVerification({
       // here; the full outcome is still in the eventual report's timeline
       // for anyone who needs the detail.
       onChallengeRef.current?.({ status: clientOutcome === 'PASSED' ? 'passed' : 'failed', type: pending.type });
+      // Phase 10: outcome.measurements (currently only populated by the
+      // Depth/Proximity engine — see its telemetry.measurements) is folded
+      // into the same free-form `detail` blob Head Turn/Light already use,
+      // rather than given a separate submission path — detail is a
+      // free-form dict server-side (ChallengeResultRequest.detail) for
+      // exactly this reason. Head Turn never sets outcome.measurements or
+      // any Light-specific field, so its `detail` shape is unchanged:
+      // `{reason}` or null.
+      // Phase 11: outcome.lightScore/lightValidity/lightDiagnostics (only
+      // populated for pending.type === 'LIGHT' — see
+      // useVerificationOrchestrator.js's LIGHT_CHALLENGE effect) are folded
+      // in under the exact `lightScore`/`lightValidity`/`diagnostics` keys
+      // backend/app/fusion.py's score_light() and
+      // continuous_models.build_report's challengeEvidence export read
+      // them back out under.
+      const hasLightEvidence = pending.type === 'LIGHT' && outcome.lightValidity !== undefined;
+      const detail = outcome.reason || outcome.measurements || hasLightEvidence
+        ? {
+            reason: outcome.reason ?? null,
+            ...(outcome.measurements ? { measurements: outcome.measurements } : {}),
+            ...(hasLightEvidence
+              ? {
+                  lightScore: outcome.lightScore,
+                  lightValidity: outcome.lightValidity,
+                  diagnostics: outcome.lightDiagnostics
+                }
+              : {})
+          }
+        : null;
       submitChallengeResult(
         pending.sessionId,
         pending.challengeId,
         {
           nonce: pending.nonce,
           outcome: clientOutcome,
-          detail: outcome.reason ? { reason: outcome.reason } : null
+          detail
         },
         ...withApiBase(apiBaseUrlRef.current)
       ).catch((err) => {
@@ -205,6 +277,7 @@ export function useContinuousVerification({
     startSession: () => setIsChallengeRunning(true),
     challengeEngine,
     lightChallengeEngine,
+    depthProximityEngine,
     continuous: { enabled: true, onChallengeResolved }
   });
 
@@ -275,8 +348,9 @@ export function useContinuousVerification({
     (frame) => {
       challengeEngine.processFrame(frame);
       lightChallengeEngine.processFrame(frame);
+      depthProximityEngine.processFrame(frame);
     },
-    [challengeEngine, lightChallengeEngine]
+    [challengeEngine, lightChallengeEngine, depthProximityEngine]
   );
 
   const start = useCallback(async () => {
@@ -291,7 +365,8 @@ export function useContinuousVerification({
     try {
       const created = await createContinuousSession({
         apiBaseUrl: apiBaseUrlRef.current,
-        externalRef: externalRefRef.current
+        externalRef: externalRefRef.current,
+        disableLightChallenge: disableLightChallengeRef.current
       });
       if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return null; } // camera dropped mid-create
       await startContinuousSession(created.sessionId, ...withApiBase(apiBaseUrlRef.current));

@@ -39,10 +39,10 @@ export default function DemoInterview() {
     setError('Continuous monitoring is required to proceed with this mock interview.');
   }, []);
 
-  const handleAcceptConsent = useCallback(async () => {
+  const handleAcceptConsent = useCallback(async (disableLightChallenge) => {
     setError(null);
     try {
-      const rc = createRealityCheckSession({ videoElement: videoElRef.current });
+      const rc = createRealityCheckSession({ videoElement: videoElRef.current, disableLightChallenge });
       rcRef.current = rc;
 
       rc.on('challenge', (c) => {
@@ -52,8 +52,10 @@ export default function DemoInterview() {
             message = 'Reality Check: please look directly at your screen for a moment.';
           } else if (c.type === 'TURN_HEAD_LEFT') {
             message = 'Reality Check: please turn your head to the LEFT and hold briefly.';
-          } else {
+          } else if (c.type === 'TURN_HEAD_RIGHT') {
             message = 'Reality Check: please turn your head to the RIGHT and hold briefly.';
+          } else {
+            message = 'Reality Check: please move closer to the camera and hold briefly.';
           }
           setChallengeBanner(message);
         } else {

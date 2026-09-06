@@ -31,7 +31,13 @@ SEVERITIES = ("info", "warning", "suspicious", "error")
 # Head Turn types reuse the frontend's existing challengeConstants.js
 # CHALLENGE_TYPES vocabulary verbatim (TURN_HEAD_LEFT / TURN_HEAD_RIGHT).
 # Phase 7 does not introduce a new challenge type — see ground rules.
-CHALLENGE_TYPES = ("TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT")
+# Phase 10 adds DEPTH_PROXIMITY ("move closer to the camera") as the third
+# challenge type. Scheduling (request_next_challenge's secrets.choice) and
+# risk scoring (risk.py) are both already type-agnostic, so no other backend
+# change is required to add a challenge type beyond this tuple — see
+# frontend/src/constants/depthProximityConstants.js for its config/state
+# machine and frontend/src/realityCheck/continuousTypes.js for the mirror.
+CHALLENGE_TYPES = ("TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT", "DEPTH_PROXIMITY")
 
 CHALLENGE_TRIGGERS = ("RANDOM", "EVENT")
 
@@ -41,3 +47,12 @@ CHALLENGE_STATUSES = ("PENDING", "PASSED", "FAILED", "TIMEOUT", "ABORTED")
 CHALLENGE_CLIENT_OUTCOMES = ("PASSED", "FAILED", "TIMEOUT", "ABORTED")
 
 RISK_STATES = ("LOW_RISK", "REVIEW_RECOMMENDED", "INCONCLUSIVE")
+
+# Phase 11 — engineering/research-only ground-truth labels for calibration
+# datasets (see app/continuous_models.py's set_ground_truth_label and
+# app/fusion.py's module docstring). Never surfaced to or settable by the
+# candidate-facing production verification flow; a dev/offline tool attaches
+# these to already-ended sessions purely for later score-distribution
+# comparison. GENUINE is the only "expected good" label; the rest are
+# labeled attack categories a calibration dataset might record.
+GROUND_TRUTH_LABELS = ("GENUINE", "PRINT_ATTACK", "PHONE_REPLAY", "FACE_SWAP", "MASK", "OTHER")

@@ -34,7 +34,7 @@ import LightFlashOverlay from '../components/session/LightFlashOverlay';
  * mode useVerificationOrchestrator's `continuous` mode exists to prevent.
  */
 const EngineBridge = forwardRef(function EngineBridge(
-  { videoElement, mediaStream, apiBaseUrl, externalRef, onStatus, onReport, onEvent, onChallenge },
+  { videoElement, mediaStream, apiBaseUrl, externalRef, disableLightChallenge, onStatus, onReport, onEvent, onChallenge },
   ref
 ) {
   const canvasRef = useRef(null); // required by useFaceLandmarker for its landmark-overlay draw target; never displayed
@@ -73,7 +73,8 @@ const EngineBridge = forwardRef(function EngineBridge(
     onEvent,
     onChallenge,
     apiBaseUrl,
-    externalRef
+    externalRef,
+    disableLightChallenge
   });
 
   useEffect(() => {

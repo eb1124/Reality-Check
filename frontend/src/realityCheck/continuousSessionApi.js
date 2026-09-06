@@ -54,13 +54,17 @@ async function request(apiBaseUrl, path, options) {
   return body;
 }
 
-/** options: { apiBaseUrl?, externalRef? } — externalRef is an opaque
- * caller-supplied correlation id (e.g. an assessmentAttemptId), persisted
- * and echoed back verbatim on every subsequent session/report read. */
-export function createContinuousSession({ apiBaseUrl, externalRef } = {}) {
+/** options: { apiBaseUrl?, externalRef?, disableLightChallenge? } —
+ * externalRef is an opaque caller-supplied correlation id (e.g. an
+ * assessmentAttemptId), persisted and echoed back verbatim on every
+ * subsequent session/report read. disableLightChallenge (Phase 11) is the
+ * candidate's own photosensitivity disclosure at the consent gate — when
+ * true, the backend scheduler never draws a LIGHT challenge for this
+ * session (see backend/app/continuous_models.py's request_next_challenge). */
+export function createContinuousSession({ apiBaseUrl, externalRef, disableLightChallenge } = {}) {
   return request(apiBaseUrl, '', {
     method: 'POST',
-    body: JSON.stringify({ externalRef: externalRef ?? null })
+    body: JSON.stringify({ externalRef: externalRef ?? null, disableLightChallenge: !!disableLightChallenge })
   });
 }
 

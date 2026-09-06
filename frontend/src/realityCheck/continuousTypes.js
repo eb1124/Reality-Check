@@ -56,12 +56,14 @@ export const EVENT_TYPES = /** @type {const} */ ([
 export const SEVERITIES = /** @type {const} */ (['info', 'warning', 'suspicious', 'error']);
 
 /**
- * @typedef {'TURN_HEAD_LEFT'|'TURN_HEAD_RIGHT'|'LIGHT'} ChallengeType
+ * @typedef {'TURN_HEAD_LEFT'|'TURN_HEAD_RIGHT'|'LIGHT'|'DEPTH_PROXIMITY'} ChallengeType
  * TURN_HEAD_LEFT/TURN_HEAD_RIGHT reuse the existing
  * constants/challengeConstants.js CHALLENGE_TYPES values verbatim — Phase 7
- * does not introduce a new challenge type.
+ * does not introduce a new challenge type. DEPTH_PROXIMITY ("move closer to
+ * the camera") is added in Phase 10 — see
+ * constants/depthProximityConstants.js.
  */
-export const CHALLENGE_TYPES = /** @type {const} */ (['TURN_HEAD_LEFT', 'TURN_HEAD_RIGHT', 'LIGHT']);
+export const CHALLENGE_TYPES = /** @type {const} */ (['TURN_HEAD_LEFT', 'TURN_HEAD_RIGHT', 'LIGHT', 'DEPTH_PROXIMITY']);
 
 /**
  * @typedef {'RANDOM'|'EVENT'} ChallengeTrigger

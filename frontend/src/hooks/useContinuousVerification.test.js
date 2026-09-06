@@ -6,9 +6,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useContinuousVerification, CONTINUOUS_STATE, mapToClientOutcome } from './useContinuousVerification';
 import { CHALLENGE_STATE } from '../constants/challengeConstants';
 import { LIGHT_CHALLENGE_STATE } from '../constants/lightChallengeConstants';
+import { DEPTH_PROXIMITY_STATE } from '../constants/depthProximityConstants';
 import * as api from '../realityCheck/continuousSessionApi';
 import { __setChallengeEngineState, __resetChallengeEngineMock } from './__mocks__/useChallengeEngine';
 import { __setLightChallengeState, __resetLightChallengeMock } from './__mocks__/useLightChallengeEngine';
+import { __setDepthProximityState, __resetDepthProximityMock } from './__mocks__/useDepthProximityEngine';
 
 // Phase 8: composition-root coverage. Both real bugs found in Stage 4 (the
 // stale isCameraActive closure, and the demo not knowing a challenge's
@@ -16,10 +18,11 @@ import { __setLightChallengeState, __resetLightChallengeMock } from './__mocks__
 // monitor/eventBatcher classes were already covered, but the hook that
 // wires them together into a session lifecycle was not. The real (unmodified)
 // useVerificationOrchestrator is used as-is here, matching production
-// wiring; only the two challenge engines and the backend API client are
+// wiring; only the three challenge engines and the backend API client are
 // replaced with controllable test doubles (see __mocks__ siblings).
 vi.mock('./useChallengeEngine');
 vi.mock('./useLightChallengeEngine');
+vi.mock('./useDepthProximityEngine');
 vi.mock('../realityCheck/continuousSessionApi');
 
 function renderHook(initialProps) {
@@ -81,6 +84,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetChallengeEngineMock();
   __resetLightChallengeMock();
+  __resetDepthProximityMock();
   api.createContinuousSession.mockResolvedValue({ sessionId: 'test-session-id' });
   api.startContinuousSession.mockResolvedValue({});
   api.getNextChallenge.mockResolvedValue({ none: true, reason: 'COOLDOWN' });
@@ -98,10 +102,27 @@ describe('mapToClientOutcome', () => {
     expect(mapToClientOutcome('LIGHT', LIGHT_CHALLENGE_STATE.INCONCLUSIVE)).toBe('ABORTED');
   });
 
+  it('maps LIGHT_INVALID to ABORTED, not FAILED (Phase 11: an unusable measurement is not a suspicious verdict)', () => {
+    // Light's evaluator only ever returns PASS or INCONCLUSIVE categorically
+    // (see lightChallenge.js's evaluateLightResponse) — it has no "wrong
+    // response" state, so LIGHT_INVALID (face tracking lost, insufficient
+    // ambient light, too few valid samples, etc.) is always a capture-quality
+    // problem, never evidence the candidate did the wrong thing. It must not
+    // carry challenge_failed's risk weight, and must not silently masquerade
+    // as a hard failure under fusion's validity model (see backend/app/fusion.py).
+    expect(mapToClientOutcome('LIGHT', LIGHT_CHALLENGE_STATE.INVALID)).toBe('ABORTED');
+  });
+
   it('maps the remaining LIGHT terminal states', () => {
     expect(mapToClientOutcome('LIGHT', LIGHT_CHALLENGE_STATE.PASS)).toBe('PASSED');
     expect(mapToClientOutcome('LIGHT', LIGHT_CHALLENGE_STATE.TIMEOUT)).toBe('TIMEOUT');
-    expect(mapToClientOutcome('LIGHT', LIGHT_CHALLENGE_STATE.INVALID)).toBe('FAILED');
+  });
+
+  it('maps DEPTH_PROXIMITY terminal states, including INCONCLUSIVE -> ABORTED (not FAILED)', () => {
+    expect(mapToClientOutcome('DEPTH_PROXIMITY', DEPTH_PROXIMITY_STATE.PASS)).toBe('PASSED');
+    expect(mapToClientOutcome('DEPTH_PROXIMITY', DEPTH_PROXIMITY_STATE.INCONCLUSIVE)).toBe('ABORTED');
+    expect(mapToClientOutcome('DEPTH_PROXIMITY', DEPTH_PROXIMITY_STATE.TIMEOUT)).toBe('TIMEOUT');
+    expect(mapToClientOutcome('DEPTH_PROXIMITY', DEPTH_PROXIMITY_STATE.FAILED)).toBe('FAILED');
   });
 });
 
@@ -311,6 +332,90 @@ describe('useContinuousVerification: scheduler-driven challenge lifecycle', () =
       expect.objectContaining({ nonce: 'n2', outcome: 'ABORTED' })
     );
     expect(hook.current.state).toBe(CONTINUOUS_STATE.ACTIVE);
+  });
+
+  it('runs a DEPTH_PROXIMITY challenge through the same lifecycle and forwards its measurement evidence', async () => {
+    const sched = makeFakeScheduler();
+    const hook = renderHook({
+      ...baseProps,
+      clock: sched.clock,
+      schedulerRandom: sched.random,
+      setIntervalFn: sched.setIntervalFn,
+      clearIntervalFn: sched.clearIntervalFn
+    });
+    await act(async () => {
+      await hook.current.start();
+    });
+
+    api.getNextChallenge.mockResolvedValueOnce({
+      challengeId: 'c3',
+      type: 'DEPTH_PROXIMITY',
+      nonce: 'n3',
+      expiresAt: new Date().toISOString()
+    });
+    sched.advance(60_000);
+    await act(async () => {
+      sched.fireTick();
+      await Promise.resolve();
+    });
+    expect(hook.current.state).toBe(CONTINUOUS_STATE.CHALLENGE_ACTIVE);
+
+    await act(async () => {
+      __setDepthProximityState({
+        challengeState: DEPTH_PROXIMITY_STATE.PASS,
+        telemetry: { resultReason: 'Progressive forward movement observed and sustained.', measurements: { peakScaleRatio: 1.3 } }
+      });
+    });
+
+    expect(api.submitChallengeResult).toHaveBeenCalledWith(
+      'test-session-id',
+      'c3',
+      expect.objectContaining({
+        nonce: 'n3',
+        outcome: 'PASSED',
+        detail: expect.objectContaining({ measurements: { peakScaleRatio: 1.3 } })
+      })
+    );
+    expect(hook.current.state).toBe(CONTINUOUS_STATE.ACTIVE);
+  });
+
+  it('maps a DEPTH_PROXIMITY INCONCLUSIVE result to ABORTED, not FAILED (quality issues do not carry failure risk weight)', async () => {
+    const sched = makeFakeScheduler();
+    const hook = renderHook({
+      ...baseProps,
+      clock: sched.clock,
+      schedulerRandom: sched.random,
+      setIntervalFn: sched.setIntervalFn,
+      clearIntervalFn: sched.clearIntervalFn
+    });
+    await act(async () => {
+      await hook.current.start();
+    });
+
+    api.getNextChallenge.mockResolvedValueOnce({
+      challengeId: 'c4',
+      type: 'DEPTH_PROXIMITY',
+      nonce: 'n4',
+      expiresAt: new Date().toISOString()
+    });
+    sched.advance(60_000);
+    await act(async () => {
+      sched.fireTick();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      __setDepthProximityState({
+        challengeState: DEPTH_PROXIMITY_STATE.INCONCLUSIVE,
+        invalidReason: 'Face tracking lost — no face detected.'
+      });
+    });
+
+    expect(api.submitChallengeResult).toHaveBeenCalledWith(
+      'test-session-id',
+      'c4',
+      expect.objectContaining({ nonce: 'n4', outcome: 'ABORTED' })
+    );
   });
 });
 

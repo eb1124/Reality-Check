@@ -38,6 +38,7 @@ function formatClock(ms) {
 
 export default function OaIntegrationDemo() {
   const [stage, setStage] = useState(STAGE.IDLE);
+  const [hasPhotosensitivity, setHasPhotosensitivity] = useState(false);
   const [error, setError] = useState(null);
   const [rcStatus, setRcStatus] = useState({ state: 'IDLE', challengesRun: 0 });
   const [challengeBanner, setChallengeBanner] = useState(null);
@@ -92,12 +93,16 @@ export default function OaIntegrationDemo() {
       // 3. THIS PAGE hands that SAME stream to Reality Check. Reality Check
       // will analyze it for liveness/challenges; it will not call
       // getUserMedia and will not stop any of its tracks.
-      const rc = createRealityCheckSession({ mediaStream: stream });
+      const rc = createRealityCheckSession({ mediaStream: stream, disableLightChallenge: hasPhotosensitivity });
       rcRef.current = rc;
 
       rc.on('challenge', (c) => {
         if (c.status === 'started') {
-          const label = c.type === 'LIGHT' ? 'Light Challenge' : c.type === 'TURN_HEAD_LEFT' ? 'Turn head LEFT' : 'Turn head RIGHT';
+          const label =
+            c.type === 'LIGHT' ? 'Light Challenge'
+            : c.type === 'TURN_HEAD_LEFT' ? 'Turn head LEFT'
+            : c.type === 'TURN_HEAD_RIGHT' ? 'Turn head RIGHT'
+            : 'Move closer to the camera';
           setChallengeBanner(`Reality Check challenge: ${label} — please respond now.`);
           appendLog(`Challenge started: ${c.type}`);
         } else {
@@ -121,7 +126,7 @@ export default function OaIntegrationDemo() {
     } catch (err) {
       setError(err.message || 'Failed to start the integration demo.');
     }
-  }, [appendLog]);
+  }, [appendLog, hasPhotosensitivity]);
 
   const endAssessment = useCallback(async () => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -213,6 +218,17 @@ export default function OaIntegrationDemo() {
                   Check for continuous liveness monitoring — the shared-camera contract this phase
                   exists to prove.
                 </p>
+                <label className="light-consent-row">
+                  <input
+                    type="checkbox"
+                    checked={hasPhotosensitivity}
+                    onChange={(e) => setHasPhotosensitivity(e.target.checked)}
+                  />
+                  <span>
+                    I have photosensitive epilepsy or a sensitivity to flashing/bright lights
+                    (this disables the Light Challenge's screen flash for this session).
+                  </span>
+                </label>
                 <button type="button" className="btn btn-primary btn-small" onClick={startAssessment}>
                   Start Assessment
                 </button>

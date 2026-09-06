@@ -15,6 +15,7 @@ from .continuous_schemas import (
     CreateContinuousSessionRequest,
     EndSessionRequest,
     EventBatchRequest,
+    LabelSessionRequest,
     ReportResponse,
 )
 
@@ -33,6 +34,8 @@ def _to_response(record: dict) -> ContinuousSessionResponse:
         riskState=record["risk_state"],
         riskEscalated=bool(record["risk_escalated"]),
         externalRef=record["external_ref"],
+        groundTruthLabel=record.get("ground_truth_label"),
+        lightChallengeDisabled=bool(record.get("light_disabled")),
     )
 
 
@@ -40,7 +43,7 @@ def _to_response(record: dict) -> ContinuousSessionResponse:
 def create_continuous_session(
     payload: CreateContinuousSessionRequest = Body(default_factory=CreateContinuousSessionRequest),
 ) -> ContinuousSessionResponse:
-    return _to_response(models.create_continuous_session(payload.externalRef))
+    return _to_response(models.create_continuous_session(payload.externalRef, payload.disableLightChallenge))
 
 
 @router.post("/{session_id}/start", response_model=ContinuousSessionResponse)
@@ -112,3 +115,22 @@ def get_report(session_id: str) -> ReportResponse:
     if result == models.NOT_FOUND:
         raise HTTPException(status_code=404, detail="Session not found")
     return result
+
+
+@router.post("/{session_id}/label", response_model=ContinuousSessionResponse)
+def label_session(session_id: str, payload: LabelSessionRequest) -> ContinuousSessionResponse:
+    """
+    Engineering/research-only (Phase 11 Step 15) — attaches a ground-truth
+    label to an already-ended session for offline calibration. Not part of
+    the production candidate/OA-facing contract; requires the session to
+    already be in a terminal state precisely so it can never be used to
+    influence a still-in-progress verification.
+    """
+    result = models.set_ground_truth_label(session_id, payload.label)
+    if result == models.NOT_FOUND:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if result == models.NOT_TERMINAL:
+        raise HTTPException(status_code=409, detail="Session must be in a terminal state before it can be labeled")
+    if result == models.INVALID_LABEL:
+        raise HTTPException(status_code=422, detail="label is not a recognized ground-truth label")
+    return _to_response(result)

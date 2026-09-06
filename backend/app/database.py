@@ -89,6 +89,17 @@ def init_db() -> None:
         existing_continuous_columns = {row["name"] for row in conn.execute("PRAGMA table_info(continuous_sessions)")}
         if "external_ref" not in existing_continuous_columns:
             conn.execute("ALTER TABLE continuous_sessions ADD COLUMN external_ref TEXT")
+        # Phase 11: engineering/research-only ground-truth label for
+        # calibration datasets (see continuous_models.set_ground_truth_label).
+        # Never written by the production candidate-facing flow.
+        if "ground_truth_label" not in existing_continuous_columns:
+            conn.execute("ALTER TABLE continuous_sessions ADD COLUMN ground_truth_label TEXT")
+        # Photosensitivity accommodation: when set, request_next_challenge
+        # excludes LIGHT from the drawn pool for this session entirely (see
+        # continuous_models.py). Captured once at session creation, from the
+        # candidate's own consent-gate answer — never changed afterward.
+        if "light_disabled" not in existing_continuous_columns:
+            conn.execute("ALTER TABLE continuous_sessions ADD COLUMN light_disabled INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS session_events (

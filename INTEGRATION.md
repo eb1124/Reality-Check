@@ -15,7 +15,8 @@ Reality Check provides:
 
 - continuous liveness monitoring (passive: face presence, multiple faces,
   frozen frame, camera interruption)
-- challenge scheduling (Head Turn, Light Challenge) at unpredictable times
+- challenge scheduling (Head Turn, Light Challenge, Depth/Proximity) at
+  unpredictable times
 - a session integrity report at the end
 
 Reality Check does **not** provide, and will never render:
@@ -27,10 +28,10 @@ Reality Check does **not** provide, and will never render:
 The only UI Reality Check ever puts on screen is a full-viewport colour
 flash during the Light Challenge (a physical requirement of that
 challenge — it has to actually illuminate the candidate's face) and,
-optionally, a mirrored `<video>` preview if you ask for one. Head Turn has
-no visual of its own; you display the instruction text yourself, driven by
-the `challenge` event (see below) — this keeps Reality Check out of your
-UI entirely.
+optionally, a mirrored `<video>` preview if you ask for one. Head Turn and
+Depth/Proximity have no visual of their own; you display the instruction
+text yourself, driven by the `challenge` event (see below) — this keeps
+Reality Check out of your UI entirely.
 
 ## Install / import
 
@@ -104,7 +105,7 @@ const rc = createRealityCheckSession({
 
 rc.on('event', (e) => { /* face_missing, camera_stream_interrupted, ... */ });
 rc.on('challenge', (c) => {
-  if (c.status === 'started') showBanner(c.type); // 'TURN_HEAD_LEFT' | 'TURN_HEAD_RIGHT' | 'LIGHT'
+  if (c.status === 'started') showBanner(c.type); // 'TURN_HEAD_LEFT' | 'TURN_HEAD_RIGHT' | 'LIGHT' | 'DEPTH_PROXIMITY'
   else hideBanner();
 });
 
@@ -166,6 +167,7 @@ for storing that ID yourself.
 | `videoElement` | `HTMLVideoElement` | none | if given, the live stream is mirrored onto it for your own preview |
 | `apiBaseUrl` | `string` | same-origin `/api` | backend origin override |
 | `externalRef` | `string` (≤200 chars) | none | your own correlation id |
+| `disableLightChallenge` | `boolean` | `false` | set true when the candidate has disclosed photosensitive epilepsy or a sensitivity to flashing/bright lights — the backend then never draws a LIGHT challenge for this session (see `ContinuousConsentGate.jsx` for the reference consent-UI pattern) |
 
 Returns `{ start, on, getStatus, end }`.
 
@@ -264,9 +266,9 @@ to the camera stream). Handle them if you like, but don't depend on
 receiving them today; see "Remaining limitations" in the Phase 9 report.
 
 Subscribe via `rc.on('challenge', handler)` for the challenge lifecycle
-specifically. Each payload is `{ status: 'started' | 'passed' | 'failed', type: 'TURN_HEAD_LEFT' | 'TURN_HEAD_RIGHT' | 'LIGHT' }`.
-This is how you know **which direction to display** for Head Turn — Reality
-Check does not render that instruction itself:
+specifically. Each payload is `{ status: 'started' | 'passed' | 'failed', type: 'TURN_HEAD_LEFT' | 'TURN_HEAD_RIGHT' | 'LIGHT' | 'DEPTH_PROXIMITY' }`.
+This is how you know **which instruction to display** for Head Turn and
+Depth/Proximity — Reality Check does not render that instruction itself:
 
 ```js
 rc.on('challenge', (c) => {
@@ -274,7 +276,8 @@ rc.on('challenge', (c) => {
   setBanner({
     TURN_HEAD_LEFT: 'Please turn your head to the LEFT and hold briefly.',
     TURN_HEAD_RIGHT: 'Please turn your head to the RIGHT and hold briefly.',
-    LIGHT: 'Please look directly at your screen for a moment.'
+    LIGHT: 'Please look directly at your screen for a moment.',
+    DEPTH_PROXIMITY: 'Please move closer to the camera and hold briefly.'
   }[c.type]);
 });
 ```
@@ -310,6 +313,18 @@ Returned by `rc.end()`, and independently re-fetchable from the backend at
   challenges: { requested: number, passed: number, failed: number },
   suspiciousEventCount: number,
   externalRef: string | null,
+  // Phase 11 — see "Head Turn / Light fusion" below.
+  fusion: {
+    sHeadTurn: number | null, sLight: number | null, vLight: number,
+    fusedScore: number | null, decisiveHeadTurnPass: boolean,
+    headTurnWeight: number, lightWeight: number
+  },
+  challengeEvidence: Array<{
+    type: string, status: string,
+    lightScore: number | null, lightValidity: number | null,
+    diagnostics: object | null
+  }>,
+  groundTruthLabel: string | null,  // engineering/calibration only — see below
   timeline: Array<{
     eventType: string,
     severity: 'info' | 'warning' | 'suspicious' | 'error',
@@ -327,7 +342,45 @@ Notes:
   `riskScore` is an internal input to `riskState`/`riskEscalated`, not a
   polished metric. Show `riskState` (and, if useful, the challenge
   pass/fail counts and `suspiciousEventCount`), not `riskScore` itself.
+- `fusion` and `challengeEvidence` are diagnostic/calibration fields (Phase
+  11) — engineering/reporting inputs, not additional candidate-facing
+  scores. Do not surface `sLight`/`fusedScore` as a percentage in a
+  recruiter UI; show `riskState` as before.
 - Nothing here is raw biometric data — no landmarks, no frames, no pixels.
+
+### Head Turn / Light fusion (Phase 11)
+
+`riskState`/`riskEscalated` now reflect a validity-scaled fusion of Head
+Turn and Light evidence, not just the raw event-severity score:
+
+- Light's effective authority in a session scales with `vLight` (0–1), a
+  per-session validity computed client-side from real capture-quality
+  signals (screen contribution, face coverage, delivered FPS, a
+  suspected-AWB/exposure-drift check) — see `backend/app/fusion.py` and
+  `frontend/src/challenges/lightChallenge.js`'s `computeLightValidity`.
+  `vLight = 0` (unusable Light data) makes the session's risk state
+  depend on Head Turn evidence alone, exactly as if Light had never run.
+- Light is deliberately **weighted below** Head Turn
+  (`lightWeight: 0.3` vs `headTurnWeight: 1.0`, both configurable in
+  `backend/app/config.py`'s `get_fusion_config()`) — these are provisional
+  engineering priors, not calibrated coefficients (see that function's
+  docstring).
+- Light can lift a marginal/under-review result to `LOW_RISK`, or push a
+  clean result to `REVIEW_RECOMMENDED`, but it can never — by itself —
+  push a decisive Head Turn pass into the `escalated` tier, the most
+  severe state this system has. There is no automated hard-fail tier at
+  all; the worst outcome is always "recommend human review."
+
+### Ground-truth labeling (engineering/development only)
+
+`POST /sessions/continuous/{sessionId}/label` with `{"label": "GENUINE" |
+"PRINT_ATTACK" | "PHONE_REPLAY" | "FACE_SWAP" | "MASK" | "OTHER"}` attaches
+a ground-truth label to an already-ended session, for later offline
+calibration (`backend/scripts/calibrate.py`). **This is not part of the
+candidate/OA-facing contract** — nothing in the browser UI or this
+integration calls it; it exists purely for a researcher/QA process
+building a labeled dataset to eventually replace the provisional fusion
+weights with measured ones.
 
 ## Security boundary — read before you rely on this for anything
 

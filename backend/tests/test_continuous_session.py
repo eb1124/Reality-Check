@@ -203,6 +203,32 @@ def test_second_end_call_rejected_and_does_not_mutate(client):
 
 # --- challenge scheduling: server-decided, cooldown, single-flight, max -
 
+def test_disable_light_challenge_is_stored_and_returned(client):
+    response = client.post("/sessions/continuous", json={"disableLightChallenge": True})
+    assert response.status_code == 201
+    assert response.json()["lightChallengeDisabled"] is True
+
+
+def test_disable_light_challenge_defaults_to_false(client):
+    response = client.post("/sessions/continuous")
+    assert response.json()["lightChallengeDisabled"] is False
+
+
+def test_light_never_drawn_for_a_photosensitive_candidate():
+    # Draw many challenges across many independent disabled-Light sessions
+    # and confirm LIGHT never comes up.
+    from app import continuous_models as models
+
+    seen_types = set()
+    for _ in range(40):
+        session = models.create_continuous_session(disable_light_challenge=True)
+        models.start_continuous_session(session["id"])
+        challenge = models.request_next_challenge(session["id"])
+        seen_types.add(challenge["type"])
+    assert "LIGHT" not in seen_types
+    assert seen_types <= {"TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "DEPTH_PROXIMITY"}
+
+
 def test_challenge_type_comes_from_server_and_is_not_always_the_same():
     # Draw many challenge types across many independent sessions (avoids
     # cooldown/max-per-session entirely) and confirm more than one type appears.
@@ -214,8 +240,48 @@ def test_challenge_type_comes_from_server_and_is_not_always_the_same():
         models.start_continuous_session(session["id"])
         challenge = models.request_next_challenge(session["id"])
         seen_types.add(challenge["type"])
-    assert seen_types <= {"TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT"}
+    assert seen_types <= {"TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT", "DEPTH_PROXIMITY"}
     assert len(seen_types) > 1, "40 draws should not all be the same type if truly server-random"
+
+
+def test_depth_proximity_can_be_selected_scheduled_and_resolved_with_evidence(client):
+    # Phase 10: DEPTH_PROXIMITY is a first-class challenge type alongside
+    # Head Turn/Light — the scheduler must be able to draw it, and its rich
+    # measurement evidence (a free-form dict, same contract as every other
+    # challenge type's `detail`) must persist and count toward the report.
+    from app import continuous_models as models
+
+    session_id = None
+    challenge = None
+    for _ in range(60):
+        session = models.create_continuous_session()
+        models.start_continuous_session(session["id"])
+        drawn = models.request_next_challenge(session["id"])
+        if drawn["type"] == "DEPTH_PROXIMITY":
+            session_id = session["id"]
+            challenge = drawn
+            break
+    assert challenge is not None, "DEPTH_PROXIMITY should be selectable by the server within 60 draws"
+
+    result = client.post(
+        f"/sessions/continuous/{session_id}/challenges/{challenge['challengeId']}/result",
+        json={
+            "nonce": challenge["nonce"],
+            "outcome": "PASSED",
+            "detail": {
+                "measurements": {
+                    "peakScaleRatio": 1.31,
+                    "movementDurationMs": 900,
+                    "transitionFrameCount": 22,
+                    "discontinuitySuspected": False,
+                }
+            },
+        },
+    )
+    assert result.status_code == 200
+
+    report = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert report["challenges"] == {"requested": 1, "passed": 1, "failed": 0}
 
 
 def test_cooldown_suppresses_a_second_challenge(client):
@@ -389,6 +455,118 @@ def test_end_reports_inconclusive_with_no_completed_challenges(client):
     session_id = _create_active(client)
     report = client.post(f"/sessions/continuous/{session_id}/end").json()
     assert report["riskState"] == "INCONCLUSIVE"
+
+
+def _draw_and_resolve_until(client, session_id, wanted_types, outcome_by_type, detail_by_type=None):
+    """
+    Test helper (Phase 11): repeatedly draws the next challenge (server
+    picks the type randomly) until every type in `wanted_types` has been
+    resolved with its configured outcome/detail at least once, resolving
+    any other drawn type as PASSED (a neutral no-op for fusion, since it's
+    neither Head Turn nor Light) so it doesn't distort the risk score.
+    Backdates the cooldown after every draw so this never has to sleep.
+    """
+    detail_by_type = detail_by_type or {}
+    remaining = set(wanted_types)
+    for _ in range(20):  # dev maxChallengesPerSession
+        if not remaining:
+            break
+        challenge = client.get(f"/sessions/continuous/{session_id}/next-challenge").json()
+        assert "challengeId" in challenge, challenge
+        ctype = challenge["type"]
+        # Gate on `remaining`, not the original `wanted_types` — a type can
+        # be drawn again by the server's random scheduler after it's already
+        # been satisfied once (e.g. LIGHT drawn twice before every wanted
+        # type has come up). Re-applying the same score/validity detail a
+        # second time would silently double-count that evidence in fusion's
+        # aggregation (score_light's validity-weighted mean over N identical
+        # entries), which is a test-fixture bug, not a fusion bug — so any
+        # already-satisfied type is resolved as a neutral PASSED with no
+        # detail from here on.
+        outcome = outcome_by_type.get(ctype, "PASSED") if ctype in remaining else "PASSED"
+        body = {"nonce": challenge["nonce"], "outcome": outcome}
+        if ctype in remaining and ctype in detail_by_type:
+            body["detail"] = detail_by_type[ctype]
+        client.post(
+            f"/sessions/continuous/{session_id}/challenges/{challenge['challengeId']}/result",
+            json=body,
+        )
+        remaining.discard(ctype)
+        _backdate_last_challenge(session_id, ms_ago=25_000)
+    assert not remaining, f"Could not draw every wanted type within budget; missing {remaining}"
+
+
+def test_report_includes_fusion_breakdown_and_challenge_evidence(client):
+    session_id = _create_active(client)
+    _draw_and_resolve_until(
+        client,
+        session_id,
+        wanted_types=("TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT"),
+        outcome_by_type={"TURN_HEAD_LEFT": "PASSED", "TURN_HEAD_RIGHT": "PASSED", "LIGHT": "PASSED"},
+        detail_by_type={
+            "LIGHT": {
+                "lightScore": 0.9,
+                "lightValidity": 0.95,
+                "diagnostics": {"deliveredFps": 30, "faceCoverage": 0.2, "screenContribution": 0.05},
+            }
+        },
+    )
+    report = client.post(f"/sessions/continuous/{session_id}/end").json()
+
+    assert report["riskState"] == "LOW_RISK"
+    assert report["fusion"]["sHeadTurn"] == pytest.approx(1.0)
+    assert report["fusion"]["sLight"] == pytest.approx(0.9)
+    assert report["fusion"]["vLight"] == pytest.approx(0.95)
+    assert report["fusion"]["headTurnWeight"] == 1.0
+    assert report["fusion"]["lightWeight"] == 0.3
+
+    light_evidence = [e for e in report["challengeEvidence"] if e["type"] == "LIGHT"]
+    assert light_evidence[0]["lightScore"] == 0.9
+    assert light_evidence[0]["lightValidity"] == 0.95
+    assert light_evidence[0]["diagnostics"]["deliveredFps"] == 30
+
+
+def test_suspicious_light_escalates_an_otherwise_clean_session_via_http(client):
+    session_id = _create_active(client)
+    _draw_and_resolve_until(
+        client,
+        session_id,
+        wanted_types=("TURN_HEAD_LEFT", "TURN_HEAD_RIGHT", "LIGHT"),
+        outcome_by_type={"TURN_HEAD_LEFT": "PASSED", "TURN_HEAD_RIGHT": "PASSED", "LIGHT": "ABORTED"},
+        detail_by_type={
+            "LIGHT": {"lightScore": 0.0, "lightValidity": 1.0, "diagnostics": {"resultReason": "no directional shift"}}
+        },
+    )
+    report = client.post(f"/sessions/continuous/{session_id}/end").json()
+
+    assert report["riskState"] == "REVIEW_RECOMMENDED"
+    assert report["riskEscalated"] is False  # never a hard fail from Light alone
+
+
+# --- ground-truth labeling (Phase 11, Step 15 — engineering/research only) -
+
+def test_label_rejected_before_session_is_terminal(client):
+    session_id = _create_active(client)
+    response = client.post(f"/sessions/continuous/{session_id}/label", json={"label": "GENUINE"})
+    assert response.status_code == 409
+
+
+def test_label_accepted_after_end_and_appears_in_report(client):
+    session_id = _create_active(client)
+    client.post(f"/sessions/continuous/{session_id}/end")
+    response = client.post(f"/sessions/continuous/{session_id}/label", json={"label": "PRINT_ATTACK"})
+    assert response.status_code == 200
+    assert response.json()["groundTruthLabel"] == "PRINT_ATTACK"
+
+    report = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert report["groundTruthLabel"] == "PRINT_ATTACK"
+
+
+def test_label_rejects_unrecognized_value(client):
+    session_id = _create_active(client)
+    client.post(f"/sessions/continuous/{session_id}/end")
+    response = client.post(f"/sessions/continuous/{session_id}/label", json={"label": "NOT_A_REAL_LABEL"})
+    assert response.status_code == 422
 
 
 def test_end_with_cancelled_reason(client):

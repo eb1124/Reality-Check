@@ -122,6 +122,24 @@ export const PROVISIONAL_MIN_AMBIENT_LUMINANCE = 12;
  */
 export const PROVISIONAL_GLOBAL_DRIFT_SUSPECT_RATIO = 1.5;
 
+/**
+ * Phase 11 — Light validity gate thresholds. Mirrors
+ * backend/app/config.py's get_fusion_config() "lightMin*" keys exactly —
+ * that Python dict is the source of truth (it's what the backend fusion
+ * layer, app/fusion.py, was documented and tested against); if a value
+ * changes there, it must change here too, in the same commit, same pairing
+ * convention as realityCheck/continuousTypes.js already uses for the
+ * Phase 7 vocabulary. The backend does not currently re-derive or verify
+ * these client-computed gates itself (see useLightChallengeEngine.js's
+ * module comment on why validity is computed client-side, where the raw
+ * capture-quality signals actually live) — they are enforced here only.
+ * All PROVISIONAL/unvalidated against real telemetry, same as every other
+ * constant in this file.
+ */
+export const PROVISIONAL_MIN_SCREEN_CONTRIBUTION_RATIO = 0.02;
+export const PROVISIONAL_MIN_FACE_COVERAGE_RATIO = 0.06;
+export const PROVISIONAL_MIN_DELIVERED_FPS = 24;
+
 export const LIGHT_CHALLENGE_CONFIG = {
   flashColor: PROVISIONAL_FLASH_COLOR,
   flashColorCss: PROVISIONAL_FLASH_COLOR_CSS,
@@ -140,5 +158,8 @@ export const LIGHT_CHALLENGE_CONFIG = {
   saturationLow: PROVISIONAL_SATURATION_LOW,
   saturationHigh: PROVISIONAL_SATURATION_HIGH,
   minAmbientLuminance: PROVISIONAL_MIN_AMBIENT_LUMINANCE,
-  globalDriftSuspectRatio: PROVISIONAL_GLOBAL_DRIFT_SUSPECT_RATIO
+  globalDriftSuspectRatio: PROVISIONAL_GLOBAL_DRIFT_SUSPECT_RATIO,
+  minScreenContributionRatio: PROVISIONAL_MIN_SCREEN_CONTRIBUTION_RATIO,
+  minFaceCoverageRatio: PROVISIONAL_MIN_FACE_COVERAGE_RATIO,
+  minDeliveredFps: PROVISIONAL_MIN_DELIVERED_FPS
 };

@@ -20,9 +20,10 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import get_config
-from .continuous_types import CHALLENGE_TYPES, TERMINAL_SESSION_STATES
+from .config import get_config, get_fusion_config
+from .continuous_types import CHALLENGE_TYPES, GROUND_TRUTH_LABELS, TERMINAL_SESSION_STATES
 from .database import get_connection
+from .fusion import apply_fusion_adjustment, compute_fusion
 from .risk import compute_risk
 
 STATE_CREATED = "CREATED"
@@ -94,7 +95,15 @@ def _insert_event(conn, session_id, event_type, severity, client_offset_ms, meta
     )
 
 
-def create_continuous_session(external_ref: Optional[str] = None) -> dict:
+def create_continuous_session(external_ref: Optional[str] = None, disable_light_challenge: bool = False) -> dict:
+    """
+    disable_light_challenge: the candidate's own photosensitivity
+    disclosure at the consent gate (see ContinuousConsentGate.jsx) — never
+    inferred or defaulted server-side. True permanently excludes LIGHT from
+    this session's drawn challenge pool (see request_next_challenge below);
+    it does not change scoring/fusion, which already degrades cleanly to
+    Head-Turn-only whenever no LIGHT challenge ran (app/fusion.py).
+    """
     session_id = secrets.token_urlsafe(32)
     created_at = _now_iso()
     env = get_config()["env"]
@@ -103,10 +112,10 @@ def create_continuous_session(external_ref: Optional[str] = None) -> dict:
         conn.execute(
             """
             INSERT INTO continuous_sessions
-                (id, state, env, created_at, started_at, ended_at, risk_score, risk_state, risk_escalated, external_ref)
-            VALUES (?, ?, ?, ?, NULL, NULL, 0, NULL, 0, ?)
+                (id, state, env, created_at, started_at, ended_at, risk_score, risk_state, risk_escalated, external_ref, light_disabled)
+            VALUES (?, ?, ?, ?, NULL, NULL, 0, NULL, 0, ?, ?)
             """,
-            (session_id, STATE_CREATED, env, created_at, external_ref),
+            (session_id, STATE_CREATED, env, created_at, external_ref, 1 if disable_light_challenge else 0),
         )
         conn.commit()
     finally:
@@ -175,7 +184,9 @@ def request_next_challenge(session_id: str, trigger: str = "RANDOM"):
     config = get_config()
     conn = get_connection()
     try:
-        row = conn.execute("SELECT state FROM continuous_sessions WHERE id = ?", (session_id,)).fetchone()
+        row = conn.execute(
+            "SELECT state, light_disabled FROM continuous_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
         if row is None:
             return NOT_FOUND
         if row["state"] != STATE_ACTIVE:
@@ -216,8 +227,16 @@ def request_next_challenge(session_id: str, trigger: str = "RANDOM"):
 
         # Server picks the type — secrets.choice, not random, so it can't be
         # predicted or influenced by the client (same rationale as the
-        # existing one-shot session's direction assignment).
-        challenge_type = secrets.choice(CHALLENGE_TYPES)
+        # existing one-shot session's direction assignment). LIGHT is
+        # excluded from the pool entirely for a session whose candidate
+        # disclosed photosensitivity at the consent gate (light_disabled) —
+        # this is a candidate-safety accommodation, not a scoring decision,
+        # so it happens at the draw itself rather than being handled as
+        # every LIGHT attempt auto-failing/aborting.
+        available_types = (
+            tuple(t for t in CHALLENGE_TYPES if t != "LIGHT") if row["light_disabled"] else CHALLENGE_TYPES
+        )
+        challenge_type = secrets.choice(available_types)
         challenge_id = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(24)
         requested_at = now_dt.isoformat()
@@ -324,12 +343,31 @@ def _compute_face_absent_ms(conn, session_id: str, ended_at_iso: str) -> float:
     return total_ms
 
 
+def _load_challenges_for_fusion(conn, session_id: str) -> list:
+    rows = conn.execute(
+        "SELECT challenge_type, status, detail FROM session_challenges WHERE continuous_session_id = ? ORDER BY requested_at ASC",
+        (session_id,),
+    ).fetchall()
+    return [
+        {
+            "challenge_type": r["challenge_type"],
+            "status": r["status"],
+            "detail": json.loads(r["detail"]) if r["detail"] else None,
+        }
+        for r in rows
+    ]
+
+
 def end_continuous_session(session_id: str, reason: str = STATE_ENDED):
     """
     reason: ENDED, CANCELLED, or ERROR — all three terminal states are
     finalized through this one function (§8 treats ending and cancelling
-    as the same kind of teardown operation). Computes and stores the final
-    deterministic risk result (risk.compute_risk) at the moment of ending.
+    as the same kind of teardown operation). Computes the deterministic
+    risk result (risk.compute_risk, unmodified by Phase 11), then applies
+    the Phase 11 validity-scaled Head-Turn/Light fusion adjustment
+    (fusion.apply_fusion_adjustment) on top of it before storing the final
+    risk_state/risk_escalated — see app/fusion.py for why this is a
+    separate pass rather than a change to compute_risk itself.
     """
     if reason not in TERMINAL_SESSION_STATES:
         return INVALID_TRANSITION
@@ -372,13 +410,18 @@ def end_continuous_session(session_id: str, reason: str = STATE_ENDED):
             technical_error_count=technical_error_count,
         )
 
+        challenges_for_fusion = _load_challenges_for_fusion(conn, session_id)
+        fusion_config = get_fusion_config()
+        fusion = compute_fusion(challenges_for_fusion, fusion_config)
+        final_risk, adjustment = apply_fusion_adjustment(risk, fusion, fusion_config)
+
         conn.execute(
             """
             UPDATE continuous_sessions
             SET state = ?, ended_at = ?, risk_score = ?, risk_state = ?, risk_escalated = ?
             WHERE id = ?
             """,
-            (reason, now_iso, risk["score"], risk["state"], 1 if risk["escalated"] else 0, session_id),
+            (reason, now_iso, final_risk["score"], final_risk["state"], 1 if final_risk["escalated"] else 0, session_id),
         )
         _insert_event(conn, session_id, _END_EVENT_TYPE_BY_REASON[reason], "info", None, None, now_iso)
         _insert_event(conn, session_id, "monitoring_stopped", "info", None, None, now_iso)
@@ -387,6 +430,44 @@ def end_continuous_session(session_id: str, reason: str = STATE_ENDED):
         conn.close()
 
     return build_report(session_id)
+
+
+INVALID_LABEL = "INVALID_LABEL"
+NOT_TERMINAL = "NOT_TERMINAL"
+
+
+def set_ground_truth_label(session_id: str, label: str):
+    """
+    Engineering/research-only: attaches a ground-truth label to an
+    already-ended session for later calibration-dataset comparison (Phase
+    11 Step 15). Never called by the production candidate-facing flow —
+    see continuous_routes.py's docstring on the endpoint that calls this.
+    Deliberately allowed on any terminal state (not just ENDED): a
+    CANCELLED or ERROR session can still be a useful labeled data point
+    (e.g. "candidate disconnected" is itself sometimes worth recording),
+    and re-labeling is allowed (a researcher correcting a mistaken label)
+    rather than one-shot-only like the verdict-finalizing writes above.
+    """
+    if label not in GROUND_TRUTH_LABELS:
+        return INVALID_LABEL
+
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT state FROM continuous_sessions WHERE id = ?", (session_id,)).fetchone()
+        if row is None:
+            return NOT_FOUND
+        if row["state"] not in TERMINAL_SESSION_STATES:
+            return NOT_TERMINAL
+
+        conn.execute(
+            "UPDATE continuous_sessions SET ground_truth_label = ? WHERE id = ?",
+            (label, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return get_continuous_session(session_id)
 
 
 def build_report(session_id: str):
@@ -406,7 +487,7 @@ def build_report(session_id: str):
         ).fetchall()
         challenge_rows = conn.execute(
             """
-            SELECT status FROM session_challenges
+            SELECT challenge_type, status, detail FROM session_challenges
             WHERE continuous_session_id = ? ORDER BY requested_at ASC
             """,
             (session_id,),
@@ -418,6 +499,27 @@ def build_report(session_id: str):
     requested = len(challenges)
     passed = sum(1 for c in challenges if c["status"] == CHALLENGE_STATUS_PASSED)
     failed = sum(1 for c in challenges if c["status"] in (CHALLENGE_STATUS_FAILED, CHALLENGE_STATUS_TIMEOUT))
+
+    challenges_for_fusion = [
+        {**c, "detail": json.loads(c["detail"]) if c["detail"] else None} for c in challenges
+    ]
+    fusion = compute_fusion(challenges_for_fusion, get_fusion_config())
+
+    # Phase 11 Step 14 — calibration data export. Per-challenge evidence
+    # (type, outcome, and whatever score/validity/diagnostics that
+    # challenge's own `detail` carries — derived measurements only, never
+    # raw video) so an offline tool can later correlate these against a
+    # ground-truth label without a second, separate export mechanism.
+    challenge_evidence = [
+        {
+            "type": c["challenge_type"],
+            "status": c["status"],
+            "lightScore": (c["detail"] or {}).get("lightScore") if c["challenge_type"] == "LIGHT" else None,
+            "lightValidity": (c["detail"] or {}).get("lightValidity") if c["challenge_type"] == "LIGHT" else None,
+            "diagnostics": (c["detail"] or {}).get("diagnostics") if c["detail"] else None,
+        }
+        for c in challenges_for_fusion
+    ]
 
     events = [dict(e) for e in event_rows]
     suspicious_event_count = sum(1 for e in events if e["severity"] == "suspicious")
@@ -439,6 +541,9 @@ def build_report(session_id: str):
         "challenges": {"requested": requested, "passed": passed, "failed": failed},
         "suspiciousEventCount": suspicious_event_count,
         "externalRef": session["external_ref"],
+        "fusion": fusion,
+        "challengeEvidence": challenge_evidence,
+        "groundTruthLabel": session.get("ground_truth_label"),
         "timeline": [
             {
                 "eventType": e["event_type"],
