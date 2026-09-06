@@ -94,7 +94,7 @@ def _insert_event(conn, session_id, event_type, severity, client_offset_ms, meta
     )
 
 
-def create_continuous_session() -> dict:
+def create_continuous_session(external_ref: Optional[str] = None) -> dict:
     session_id = secrets.token_urlsafe(32)
     created_at = _now_iso()
     env = get_config()["env"]
@@ -103,10 +103,10 @@ def create_continuous_session() -> dict:
         conn.execute(
             """
             INSERT INTO continuous_sessions
-                (id, state, env, created_at, started_at, ended_at, risk_score, risk_state, risk_escalated)
-            VALUES (?, ?, ?, ?, NULL, NULL, 0, NULL, 0)
+                (id, state, env, created_at, started_at, ended_at, risk_score, risk_state, risk_escalated, external_ref)
+            VALUES (?, ?, ?, ?, NULL, NULL, 0, NULL, 0, ?)
             """,
-            (session_id, STATE_CREATED, env, created_at),
+            (session_id, STATE_CREATED, env, created_at, external_ref),
         )
         conn.commit()
     finally:
@@ -438,6 +438,7 @@ def build_report(session_id: str):
         "riskEscalated": bool(session["risk_escalated"]),
         "challenges": {"requested": requested, "passed": passed, "failed": failed},
         "suspiciousEventCount": suspicious_event_count,
+        "externalRef": session["external_ref"],
         "timeline": [
             {
                 "eventType": e["event_type"],

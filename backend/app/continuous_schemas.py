@@ -10,12 +10,24 @@ Literal would create exactly the drift risk this is meant to prevent.
 """
 from typing import Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from .continuous_types import CHALLENGE_CLIENT_OUTCOMES, EVENT_TYPES, SEVERITIES
 
 SessionStateLiteral = Literal["CREATED", "ACTIVE", "ENDED", "CANCELLED", "ERROR"]
 EndReasonLiteral = Literal["ENDED", "CANCELLED", "ERROR"]
+
+
+class CreateContinuousSessionRequest(BaseModel):
+    """
+    Phase 9: lets an embedding consumer (e.g. an external online-assessment
+    app) tag a session with its own correlation id up front — a single
+    opaque string, not an arbitrary blob, so the OA can associate
+    `assessmentAttemptId <-> realityCheckSessionId` without Reality Check
+    depending on the OA's own data model. Entirely optional; omitting it
+    (or POSTing no body at all) reproduces the pre-Phase-9 behavior exactly.
+    """
+    externalRef: Optional[str] = Field(default=None, max_length=200)
 
 
 class ContinuousSessionResponse(BaseModel):
@@ -28,6 +40,7 @@ class ContinuousSessionResponse(BaseModel):
     riskScore: int
     riskState: Optional[str] = None
     riskEscalated: bool
+    externalRef: Optional[str] = None
 
 
 class EventIn(BaseModel):
@@ -82,3 +95,4 @@ class ReportResponse(BaseModel):
     challenges: dict
     suspiciousEventCount: int
     timeline: list
+    externalRef: Optional[str] = None

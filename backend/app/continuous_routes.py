@@ -12,6 +12,7 @@ from . import continuous_models as models
 from .continuous_schemas import (
     ChallengeResultRequest,
     ContinuousSessionResponse,
+    CreateContinuousSessionRequest,
     EndSessionRequest,
     EventBatchRequest,
     ReportResponse,
@@ -31,12 +32,15 @@ def _to_response(record: dict) -> ContinuousSessionResponse:
         riskScore=record["risk_score"],
         riskState=record["risk_state"],
         riskEscalated=bool(record["risk_escalated"]),
+        externalRef=record["external_ref"],
     )
 
 
 @router.post("", response_model=ContinuousSessionResponse, status_code=201)
-def create_continuous_session() -> ContinuousSessionResponse:
-    return _to_response(models.create_continuous_session())
+def create_continuous_session(
+    payload: CreateContinuousSessionRequest = Body(default_factory=CreateContinuousSessionRequest),
+) -> ContinuousSessionResponse:
+    return _to_response(models.create_continuous_session(payload.externalRef))
 
 
 @router.post("/{session_id}/start", response_model=ContinuousSessionResponse)

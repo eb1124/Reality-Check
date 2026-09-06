@@ -5,8 +5,24 @@
  * shape and same-origin /api proxy convention. Never fabricates a local
  * session/challenge on failure — every function throws a structured error
  * on any non-2xx response instead of returning a guessed value.
+ *
+ * Phase 9: every function takes an optional trailing `{ apiBaseUrl }`,
+ * defaulting to the same-origin `/api` proxy this project's own
+ * demo-interview.html relies on. An embedding OA is a genuinely separate
+ * web app (its own origin/port) rather than another page of this same Vite
+ * dev server, so it cannot rely on that proxy — createRealityCheckSession's
+ * own `apiBaseUrl` option threads down to here so such a consumer can point
+ * directly at wherever the Reality Check backend is actually deployed
+ * (e.g. "http://localhost:8000"). Omitting it reproduces the pre-Phase-9
+ * same-origin behavior exactly, which is why every call site in
+ * useContinuousVerification.js that doesn't have an apiBaseUrl configured
+ * calls these functions with the exact same argument lists as before.
  */
-const API_BASE = '/api/sessions/continuous';
+const DEFAULT_BASE = '/api/sessions/continuous';
+
+function resolveBase(apiBaseUrl) {
+  return apiBaseUrl ? `${apiBaseUrl.replace(/\/+$/, '')}/sessions/continuous` : DEFAULT_BASE;
+}
 
 class ContinuousSessionError extends Error {
   constructor(message, { status, body } = {}) {
@@ -17,10 +33,10 @@ class ContinuousSessionError extends Error {
   }
 }
 
-async function request(path, options) {
+async function request(apiBaseUrl, path, options) {
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(`${resolveBase(apiBaseUrl)}${path}`, {
       headers: { 'Content-Type': 'application/json' },
       ...options
     });
@@ -38,43 +54,49 @@ async function request(path, options) {
   return body;
 }
 
-export function createContinuousSession() {
-  return request('', { method: 'POST' });
+/** options: { apiBaseUrl?, externalRef? } — externalRef is an opaque
+ * caller-supplied correlation id (e.g. an assessmentAttemptId), persisted
+ * and echoed back verbatim on every subsequent session/report read. */
+export function createContinuousSession({ apiBaseUrl, externalRef } = {}) {
+  return request(apiBaseUrl, '', {
+    method: 'POST',
+    body: JSON.stringify({ externalRef: externalRef ?? null })
+  });
 }
 
-export function startContinuousSession(sessionId) {
-  return request(`/${sessionId}/start`, { method: 'POST' });
+export function startContinuousSession(sessionId, { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/start`, { method: 'POST' });
 }
 
-export function submitEvents(sessionId, events) {
-  return request(`/${sessionId}/events`, {
+export function submitEvents(sessionId, events, { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/events`, {
     method: 'POST',
     body: JSON.stringify({ events })
   });
 }
 
 /** trigger: 'RANDOM' | 'EVENT'. Returns a NextChallenge or NoNextChallenge shape (see continuousTypes.js). */
-export function getNextChallenge(sessionId, trigger = 'RANDOM') {
-  return request(`/${sessionId}/next-challenge?trigger=${trigger}`, { method: 'GET' });
+export function getNextChallenge(sessionId, trigger = 'RANDOM', { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/next-challenge?trigger=${trigger}`, { method: 'GET' });
 }
 
-export function submitChallengeResult(sessionId, challengeId, { nonce, outcome, detail }) {
-  return request(`/${sessionId}/challenges/${challengeId}/result`, {
+export function submitChallengeResult(sessionId, challengeId, { nonce, outcome, detail }, { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/challenges/${challengeId}/result`, {
     method: 'POST',
     body: JSON.stringify({ nonce, outcome, detail })
   });
 }
 
 /** reason: 'ENDED' | 'CANCELLED' | 'ERROR', defaults to 'ENDED'. Returns the final report. */
-export function endContinuousSession(sessionId, reason = 'ENDED') {
-  return request(`/${sessionId}/end`, {
+export function endContinuousSession(sessionId, reason = 'ENDED', { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/end`, {
     method: 'POST',
     body: JSON.stringify({ reason })
   });
 }
 
-export function getReport(sessionId) {
-  return request(`/${sessionId}/report`, { method: 'GET' });
+export function getReport(sessionId, { apiBaseUrl } = {}) {
+  return request(apiBaseUrl, `/${sessionId}/report`, { method: 'GET' });
 }
 
 export { ContinuousSessionError };

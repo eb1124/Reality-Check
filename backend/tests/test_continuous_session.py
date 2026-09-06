@@ -396,3 +396,36 @@ def test_end_with_cancelled_reason(client):
     response = client.post(f"/sessions/continuous/{session_id}/end", json={"reason": "CANCELLED"})
     assert response.status_code == 200
     assert response.json()["state"] == "CANCELLED"
+
+
+# --- Phase 9: external-consumer correlation id (externalRef) --------------
+
+def test_create_without_body_still_works_and_external_ref_is_none(client):
+    # No JSON body at all — the pre-Phase-9 call shape must keep working.
+    response = client.post("/sessions/continuous")
+    assert response.status_code == 201
+    assert response.json()["externalRef"] is None
+
+
+def test_external_ref_is_stored_and_returned_on_create(client):
+    response = client.post("/sessions/continuous", json={"externalRef": "assessment-attempt-42"})
+    assert response.status_code == 201
+    assert response.json()["externalRef"] == "assessment-attempt-42"
+
+
+def test_external_ref_survives_start_and_appears_in_report(client):
+    session = client.post("/sessions/continuous", json={"externalRef": "assessment-attempt-42"}).json()
+    session_id = session["sessionId"]
+    started = client.post(f"/sessions/continuous/{session_id}/start").json()
+    assert started["externalRef"] == "assessment-attempt-42"
+
+    report = client.post(f"/sessions/continuous/{session_id}/end").json()
+    assert report["externalRef"] == "assessment-attempt-42"
+
+    reread = client.get(f"/sessions/continuous/{session_id}/report").json()
+    assert reread["externalRef"] == "assessment-attempt-42"
+
+
+def test_external_ref_too_long_is_rejected(client):
+    response = client.post("/sessions/continuous", json={"externalRef": "x" * 201})
+    assert response.status_code == 422

@@ -3,14 +3,25 @@ import { CAMERA_STATUS, CAMERA_ERROR_MESSAGES } from '../constants/sessionConsta
 
 /**
  * Custom hook to manage webcam lifecycle, stream binding, and error states.
+ *
+ * Phase 9: also accepts an externally-supplied `externalStream` (e.g. a
+ * MediaStream an embedding online-assessment app already opened via its own
+ * getUserMedia call so it can record the candidate). When present, this
+ * hook never calls getUserMedia itself and — critically — never calls
+ * `track.stop()` on that stream, on stopCamera() or on unmount: an
+ * externally-owned stream's lifecycle belongs entirely to its caller for as
+ * long as this hook exists. Only a stream this hook acquired itself is ever
+ * stopped by it (tracked via `ownedStreamRef`, independent of the `stream`
+ * state value so an external stream can be swapped in/out without changing
+ * this ownership invariant).
  */
-export function useCamera() {
+export function useCamera({ externalStream = null } = {}) {
   const [stream, setStream] = useState(null);
   const [status, setStatus] = useState(CAMERA_STATUS.IDLE);
   const [error, setError] = useState(null);
   const videoRef = useRef(null);
+  const ownedStreamRef = useRef(null);
 
-  // Helper to stop all active media tracks
   const stopTracks = useCallback((mediaStream) => {
     if (mediaStream) {
       mediaStream.getTracks().forEach((track) => {
@@ -23,24 +34,47 @@ export function useCamera() {
     }
   }, []);
 
-  // Stop camera feed and reset state
   const stopCamera = useCallback(() => {
-    if (stream) {
-      stopTracks(stream);
-      setStream(null);
+    if (ownedStreamRef.current) {
+      stopTracks(ownedStreamRef.current);
     }
+    ownedStreamRef.current = null;
+    setStream(null);
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
     setStatus(CAMERA_STATUS.IDLE);
     setError(null);
-  }, [stream, stopTracks]);
+  }, [stopTracks]);
+
+  const adoptExternalStream = useCallback((mediaStream) => {
+    ownedStreamRef.current = null; // never ours to stop
+    setStream(mediaStream);
+    setStatus(CAMERA_STATUS.ACTIVE);
+    setError(null);
+    if (videoRef.current) {
+      videoRef.current.srcObject = mediaStream;
+      // Optional chaining: .play() always returns a Promise per spec, but
+      // some non-browser/test DOM implementations (e.g. jsdom) return
+      // undefined instead of rejecting — this must degrade quietly there
+      // rather than throw.
+      videoRef.current.play()?.catch((playErr) => {
+        console.warn('Auto-play video error:', playErr);
+      });
+    }
+  }, []);
 
   // Request camera access and attach stream to video element
   const startCamera = useCallback(async () => {
-    // Teardown any existing stream first
-    if (stream) {
-      stopTracks(stream);
+    if (externalStream) {
+      adoptExternalStream(externalStream);
+      return;
+    }
+
+    // Teardown any existing internally-owned stream first
+    if (ownedStreamRef.current) {
+      stopTracks(ownedStreamRef.current);
+      ownedStreamRef.current = null;
       setStream(null);
     }
 
@@ -64,14 +98,18 @@ export function useCamera() {
 
       const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
 
+      ownedStreamRef.current = mediaStream;
       setStream(mediaStream);
       setStatus(CAMERA_STATUS.ACTIVE);
       setError(null);
 
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
-        // Ensure video plays smoothly
-        videoRef.current.play().catch((playErr) => {
+        // Ensure video plays smoothly. Optional chaining: .play() always
+        // returns a Promise per spec, but some non-browser/test DOM
+        // implementations (e.g. jsdom) return undefined instead of
+        // rejecting — this must degrade quietly there rather than throw.
+        videoRef.current.play()?.catch((playErr) => {
           console.warn('Auto-play video error:', playErr);
         });
       }
@@ -90,24 +128,39 @@ export function useCamera() {
         rawError: err.message
       });
     }
-  }, [stream, stopTracks]);
+  }, [stopTracks, externalStream, adoptExternalStream]);
+
+  // If the caller supplies (or swaps in) an external stream while this hook
+  // is already mounted, without an explicit startCamera() call, adopt it
+  // live — releasing any internally-owned stream first.
+  useEffect(() => {
+    if (!externalStream || externalStream === stream) return;
+    if (ownedStreamRef.current) {
+      stopTracks(ownedStreamRef.current);
+    }
+    adoptExternalStream(externalStream);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalStream]);
 
   // Synchronize video element srcObject when videoRef attaches or stream changes
   useEffect(() => {
     if (videoRef.current && stream && videoRef.current.srcObject !== stream) {
       videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((err) => console.warn('Stream play error:', err));
+      videoRef.current.play()?.catch((err) => console.warn('Stream play error:', err));
     }
   }, [stream]);
 
-  // Cleanup tracks on component unmount
+  // Cleanup ONLY on unmount, and only ever stops a stream this hook itself
+  // acquired via getUserMedia — an externally-supplied MediaStream outlives
+  // this hook unconditionally (see module docstring).
   useEffect(() => {
     return () => {
-      if (stream) {
-        stopTracks(stream);
+      if (ownedStreamRef.current) {
+        stopTracks(ownedStreamRef.current);
       }
     };
-  }, [stream, stopTracks]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return {
     stream,

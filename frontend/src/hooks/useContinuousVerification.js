@@ -61,12 +61,30 @@ export function mapToClientOutcome(challengeKind, engineState) {
  * this (consistent with "keep camera teardown reliable... follow whatever
  * guard pattern already exists").
  */
+// Builds a trailing-args array that's empty when apiBaseUrl is unset, so
+// call sites asserted via toHaveBeenCalledWith(...) in
+// useContinuousVerification.test.js keep seeing the exact same argument
+// list as before Phase 9 whenever no apiBaseUrl override is configured
+// (the case for every existing test, and for the standalone demo).
+function withApiBase(apiBaseUrl) {
+  return apiBaseUrl ? [{ apiBaseUrl }] : [];
+}
+
 export function useContinuousVerification({
   isCameraActive,
   videoRef,
   faceCount,
   onEvent,
   onChallenge,
+  // Phase 9: overrides the same-origin `/api` proxy default so a genuinely
+  // separate-origin consumer (see continuousSessionApi.js's module
+  // docstring) can point at wherever the Reality Check backend actually
+  // runs. Undefined -> byte-identical pre-Phase-9 behavior.
+  apiBaseUrl,
+  // Phase 9: opaque caller correlation id (e.g. an assessmentAttemptId),
+  // attached once at session creation — see continuous_schemas.py's
+  // CreateContinuousSessionRequest.
+  externalRef,
   // Test-only timer overrides for the scheduler's polling loop, threaded
   // straight through to useChallengeScheduler (see that hook's own params).
   // Default to the real global timers, so this is a no-op in production —
@@ -84,6 +102,22 @@ export function useContinuousVerification({
   onEventRef.current = onEvent;
   const onChallengeRef = useRef(onChallenge);
   onChallengeRef.current = onChallenge;
+  // apiBaseUrl practically never changes mid-session, but is read via a ref
+  // (matching every other cross-render value this file's memoized
+  // callbacks close over) rather than added to their dependency arrays, so
+  // it can't introduce staleness bugs if it ever did.
+  const apiBaseUrlRef = useRef(apiBaseUrl);
+  apiBaseUrlRef.current = apiBaseUrl;
+  const externalRefRef = useRef(externalRef);
+  externalRefRef.current = externalRef;
+
+  // Set once start() actually reaches ACTIVE; lets every passively-observed
+  // event carry a clientOffsetMs (ms since monitoring began) alongside the
+  // server's own wall-clock timestamp, so a consumer recording video
+  // alongside this session (Phase 9's whole reason for existing) can align
+  // "this event happened at t=+21400ms" with its own recording's timeline
+  // without the two clocks needing to agree on wall-clock time.
+  const sessionStartRef = useRef(null);
 
   const [state, setState] = useState(CONTINUOUS_STATE.IDLE);
   const [sessionId, setSessionId] = useState(null);
@@ -147,11 +181,16 @@ export function useContinuousVerification({
       // here; the full outcome is still in the eventual report's timeline
       // for anyone who needs the detail.
       onChallengeRef.current?.({ status: clientOutcome === 'PASSED' ? 'passed' : 'failed', type: pending.type });
-      submitChallengeResult(pending.sessionId, pending.challengeId, {
-        nonce: pending.nonce,
-        outcome: clientOutcome,
-        detail: outcome.reason ? { reason: outcome.reason } : null
-      }).catch((err) => {
+      submitChallengeResult(
+        pending.sessionId,
+        pending.challengeId,
+        {
+          nonce: pending.nonce,
+          outcome: clientOutcome,
+          detail: outcome.reason ? { reason: outcome.reason } : null
+        },
+        ...withApiBase(apiBaseUrlRef.current)
+      ).catch((err) => {
         // Best-effort, matching the one-shot flow's submitVerificationResult
         // handling — never blocks or alters what's already happened locally.
         console.warn('Failed to submit continuous challenge result:', err);
@@ -173,7 +212,7 @@ export function useContinuousVerification({
     async (trigger) => {
       if (stateRef.current !== CONTINUOUS_STATE.ACTIVE) return; // single-flight guard
       try {
-        const next = await getNextChallenge(sessionId, trigger);
+        const next = await getNextChallenge(sessionId, trigger, { apiBaseUrl: apiBaseUrlRef.current });
         if (stateRef.current !== CONTINUOUS_STATE.ACTIVE) return; // torn down while awaiting
         if (next?.none) return; // backend is authoritative — its own cooldown/budget may disagree
         pendingChallengeRef.current = { ...next, sessionId, type: next.type };
@@ -193,11 +232,14 @@ export function useContinuousVerification({
     isActive: isMonitoringActive,
     onFlush: (events) => {
       if (!sessionId) return;
-      submitEvents(sessionId, events).catch((err) => console.warn('Failed to flush continuous events:', err));
+      submitEvents(sessionId, events, { apiBaseUrl: apiBaseUrlRef.current }).catch((err) =>
+        console.warn('Failed to flush continuous events:', err)
+      );
     },
     onImmediateTrigger: () => schedulerControlsRef.current?.requestEventTrigger(),
     onSuspiciousEvent: () => schedulerControlsRef.current?.noteSuspiciousEvent(),
-    onEvent: (e) => onEventRef.current?.(e)
+    onEvent: (e) => onEventRef.current?.(e),
+    getClientOffsetMs: () => (sessionStartRef.current == null ? null : clock() - sessionStartRef.current)
   });
 
   const schedulerControls = useChallengeScheduler({
@@ -243,21 +285,27 @@ export function useContinuousVerification({
     // startCamera(), so by the time this function's body actually runs,
     // the camera can already be active even though it wasn't at the
     // moment this particular closure was created.
-    if (!isCameraActiveRef.current) return;
+    if (!isCameraActiveRef.current) return null;
     setStartError(null);
     setState(CONTINUOUS_STATE.STARTING);
     try {
-      const created = await createContinuousSession();
-      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return; } // camera dropped mid-create
-      await startContinuousSession(created.sessionId);
-      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return; }
+      const created = await createContinuousSession({
+        apiBaseUrl: apiBaseUrlRef.current,
+        externalRef: externalRefRef.current
+      });
+      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return null; } // camera dropped mid-create
+      await startContinuousSession(created.sessionId, ...withApiBase(apiBaseUrlRef.current));
+      if (!isCameraActiveRef.current) { setState(CONTINUOUS_STATE.IDLE); return null; }
+      sessionStartRef.current = clock();
       setSessionId(created.sessionId);
       setState(CONTINUOUS_STATE.ACTIVE);
+      return created.sessionId;
     } catch (err) {
       setStartError(err);
       setState(CONTINUOUS_STATE.IDLE);
+      return null;
     }
-  }, []);
+  }, [clock]);
 
   const end = useCallback(
     async (reason = 'ENDED') => {
@@ -266,7 +314,7 @@ export function useContinuousVerification({
       setState(CONTINUOUS_STATE.ENDED);
       if (!idToEnd) return null;
       try {
-        const finalReport = await endContinuousSession(idToEnd, reason);
+        const finalReport = await endContinuousSession(idToEnd, reason, ...withApiBase(apiBaseUrlRef.current));
         setReport(finalReport);
         return finalReport;
       } catch (err) {

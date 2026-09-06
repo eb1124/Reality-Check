@@ -76,10 +76,19 @@ def init_db() -> None:
                 ended_at TEXT,
                 risk_score INTEGER NOT NULL DEFAULT 0,
                 risk_state TEXT,
-                risk_escalated INTEGER NOT NULL DEFAULT 0
+                risk_escalated INTEGER NOT NULL DEFAULT 0,
+                external_ref TEXT
             )
             """
         )
+        # Phase 9: optional external-consumer correlation id (e.g. an
+        # assessmentAttemptId from an embedding OA), added after the table
+        # above already existed for early Phase 7 databases — same
+        # PRAGMA-then-ALTER migration style as the `sessions` table's own
+        # post-hoc columns further up this file.
+        existing_continuous_columns = {row["name"] for row in conn.execute("PRAGMA table_info(continuous_sessions)")}
+        if "external_ref" not in existing_continuous_columns:
+            conn.execute("ALTER TABLE continuous_sessions ADD COLUMN external_ref TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS session_events (

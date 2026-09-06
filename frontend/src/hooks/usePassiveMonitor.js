@@ -32,6 +32,11 @@ export function usePassiveMonitor({
   onImmediateTrigger,
   onSuspiciousEvent,
   onEvent,
+  // Phase 9: called once per observed event to attach a session-relative
+  // clientOffsetMs (see useContinuousVerification.js's sessionStartRef) —
+  // defaults to "no offset available", which reproduces the pre-Phase-9
+  // behavior of always sending clientOffsetMs: null exactly.
+  getClientOffsetMs = () => null,
   clock = Date.now,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval
@@ -44,6 +49,8 @@ export function usePassiveMonitor({
   onSuspiciousEventRef.current = onSuspiciousEvent;
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const getClientOffsetMsRef = useRef(getClientOffsetMs);
+  getClientOffsetMsRef.current = getClientOffsetMs;
 
   const wasFaceMissingSuspiciousRef = useRef(false);
   const batcherRef = useRef(null);
@@ -56,7 +63,7 @@ export function usePassiveMonitor({
   }
 
   const handleEvent = useCallback((eventType, severity, metadata) => {
-    batcherRef.current.add({ eventType, severity, metadata, clientOffsetMs: null });
+    batcherRef.current.add({ eventType, severity, metadata, clientOffsetMs: getClientOffsetMsRef.current() });
     // Public-interface event feed (§9: "event type + severity, no
     // internals") — every observed event, independent of batching/flush
     // timing, which is purely a backend-persistence concern.
