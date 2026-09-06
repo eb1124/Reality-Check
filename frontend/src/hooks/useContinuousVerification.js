@@ -36,7 +36,7 @@ export const CONTINUOUS_STATE = {
 // Light Challenge design's own "inconclusive is not a failure, only a
 // supplementary signal" intent (see lightChallenge.js's module docstring)
 // even though continuous mode now scores challenges individually.
-function mapToClientOutcome(challengeKind, engineState) {
+export function mapToClientOutcome(challengeKind, engineState) {
   if (challengeKind === 'LIGHT') {
     if (engineState === LIGHT_CHALLENGE_STATE.PASS) return 'PASSED';
     if (engineState === LIGHT_CHALLENGE_STATE.INCONCLUSIVE) return 'ABORTED';
@@ -61,7 +61,23 @@ function mapToClientOutcome(challengeKind, engineState) {
  * this (consistent with "keep camera teardown reliable... follow whatever
  * guard pattern already exists").
  */
-export function useContinuousVerification({ isCameraActive, videoRef, faceCount, onEvent, onChallenge }) {
+export function useContinuousVerification({
+  isCameraActive,
+  videoRef,
+  faceCount,
+  onEvent,
+  onChallenge,
+  // Test-only timer overrides for the scheduler's polling loop, threaded
+  // straight through to useChallengeScheduler (see that hook's own params).
+  // Default to the real global timers, so this is a no-op in production —
+  // exists purely so Phase 8's composition-root tests can fire scheduler
+  // decisions deterministically instead of waiting out a real 30-90s window.
+  clock = Date.now,
+  schedulerRandom = Math.random,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  schedulerPollIntervalMs = 1000
+}) {
   const config = getRealityCheckConfig();
 
   const onEventRef = useRef(onEvent);
@@ -187,7 +203,12 @@ export function useContinuousVerification({ isCameraActive, videoRef, faceCount,
   const schedulerControls = useChallengeScheduler({
     config,
     isActive: isMonitoringActive,
-    onRunChallenge: runChallenge
+    onRunChallenge: runChallenge,
+    clock,
+    random: schedulerRandom,
+    setIntervalFn,
+    clearIntervalFn,
+    pollIntervalMs: schedulerPollIntervalMs
   });
   const schedulerControlsRef = useRef(schedulerControls);
   schedulerControlsRef.current = schedulerControls;

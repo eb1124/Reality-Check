@@ -22,13 +22,14 @@ export function useChallengeScheduler({
   isActive,
   onRunChallenge,
   clock = Date.now,
+  random = Math.random,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   pollIntervalMs = 1000
 }) {
   const schedulerRef = useRef(null);
   if (schedulerRef.current === null) {
-    schedulerRef.current = new ChallengeScheduler({ config, now: clock });
+    schedulerRef.current = new ChallengeScheduler({ config, now: clock, random });
   }
 
   const onRunChallengeRef = useRef(onRunChallenge);
